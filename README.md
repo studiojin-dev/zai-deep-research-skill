@@ -109,6 +109,13 @@ For other native locations, install manually if your client requires them.
 
 ## After Installation
 
+If you installed into a shared path, run commands from the installed skill directory instead of the repository checkout:
+
+- user install: `~/.agents/skills/zai-deep-research`
+- workspace install: `./.agents/skills/zai-deep-research`
+
+The examples below still use repository-relative paths so they also work before installation or when testing from a clone.
+
 ### Validate the selected client
 
 Always validate before first use:
@@ -131,6 +138,13 @@ Copy the example config if you need to change storage paths, MCP names, or the d
 
 ```bash
 cp zai-deep-research/assets/config.example.json zai-deep-research/config.json
+```
+
+If you are already running from an installed shared path, use the installed paths instead:
+
+```bash
+cp ~/.agents/skills/zai-deep-research/assets/config.example.json ~/.agents/skills/zai-deep-research/config.json
+python ~/.agents/skills/zai-deep-research/scripts/run.py --validate --client codex
 ```
 
 Important config fields:

@@ -25,6 +25,10 @@ Use this skill when the user needs a researched answer grounded in current web p
 - `scripts/install.sh` — installs the skill into the shared Agent Skills path or the documented Gemini layout. Use `--dry-run` to preview the install plan first.
 - `scripts/eval.py` — snapshots the current skill, runs the committed eval suite against `with_skill` and `old_skill`, and generates grading plus benchmark artifacts.
 
+## Installation note
+- Shared installs live under `~/.agents/skills/zai-deep-research` or `./.agents/skills/zai-deep-research`.
+- Repository-relative examples like `python scripts/run.py ...` assume your current directory is the skill root. If you installed the skill elsewhere, run the same commands from the installed skill directory or with absolute paths.
+
 ## Default workflow
 1. Validate the selected client and MCP wiring:
 
@@ -54,11 +58,15 @@ python scripts/run.py "your research query" --client codex --json
 - The launcher writes runtime state under `./.zai-deep-research` and the final report under `./research/` unless you override the paths.
 - `--json` is opt-in and keeps the default text output backward compatible.
 - Validation now shows the detected MCP names, so a false negative from `codex mcp list` parsing is easier to spot and debug.
+- Clarification-required runs exit with code `2`.
 
 ## Gotchas
 - This is a generic Agent Skills package, but it is not generic infrastructure-free research. Without z.ai Coding Plan access and the four z.ai MCP servers, it cannot deliver its intended workflow.
 - MCP server names must match exactly unless you override them in `config.json`.
 - `scripts/run.py` is a convenience launcher, not a requirement of the skill format. Clients may differ internally, but the expected output contract stays the same: validated prerequisites, iterative evidence gathering, and a final Markdown report.
+- On `codex`, launcher sub-runs force `reasoning_effort="medium"` so this skill does not inherit an unexpectedly slow global setting.
+- On `codex`, a preflight probe can temporarily disable broken remote MCP transports for the current run. JSON output exposes this as `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names`.
+- Runtime JSON also includes `step_events`, `run_summary`, and `final_decision` so wrappers can distinguish normal completion, skipped steps, and aborted runs.
 - Vector memory is optional. If FAISS dependencies are unavailable, the launcher still runs without semantic recall.
 - The skill supports both live web research and repository-backed investigation. Use the web-centric eval suite to watch for regressions in source hygiene, caveats, and freshness handling.
 

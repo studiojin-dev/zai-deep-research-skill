@@ -109,6 +109,13 @@ sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope
 
 ## 설치 후
 
+공유 경로에 설치한 뒤에는 저장소 checkout 경로가 아니라 설치된 스킬 경로에서 명령을 실행해 주세요.
+
+- 사용자 전역 설치: `~/.agents/skills/zai-deep-research`
+- 워크스페이스 설치: `./.agents/skills/zai-deep-research`
+
+아래 예시는 clone 상태에서도 바로 실행할 수 있도록 계속 저장소 상대 경로를 사용합니다.
+
 ### 먼저 클라이언트 검증
 
 처음 사용하시기 전에 반드시 검증해 주세요.
@@ -131,6 +138,13 @@ python zai-deep-research/scripts/run.py --validate --client codex --json
 
 ```bash
 cp zai-deep-research/assets/config.example.json zai-deep-research/config.json
+```
+
+이미 공유 설치 경로에서 사용 중이라면 설치된 경로 기준으로 다음처럼 실행하시면 됩니다.
+
+```bash
+cp ~/.agents/skills/zai-deep-research/assets/config.example.json ~/.agents/skills/zai-deep-research/config.json
+python ~/.agents/skills/zai-deep-research/scripts/run.py --validate --client codex
 ```
 
 중요 필드:
