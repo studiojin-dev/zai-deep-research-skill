@@ -95,6 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-ski
 ```
 
 Use `--dry-run` whenever you want to confirm the resolved source and destination before copying files.
+Use `--force` only when you intentionally want to replace an existing installation.
 
 ### Optional native layout
 
@@ -157,7 +158,9 @@ python zai-deep-research/scripts/run.py "Compare the latest open-source browser 
 Use `--json` when you need a stable interface for automation, eval harnesses, or wrapper scripts. The payload is opt-in so existing text-mode workflows remain unchanged.
 
 - `--validate --json` returns validation status, configured MCP names, missing MCPs, vector memory availability, and duration.
-- normal `--json` runs return status, client, session id, report path, iteration count, clarification questions, duration, and best-effort token usage.
+- normal `--json` runs return `success`, `clarification_required`, or `error` status plus client, session id, report path, iteration count, clarification questions, duration, and best-effort token usage.
+- when clarification is required, the launcher exits with code `2`, leaves `report_path` empty, and returns the blocking questions in `clarification_questions`.
+- `token_usage` may be `null` when the selected backend does not expose stable usage metadata.
 
 If vector memory dependencies are not installed, validation reports it as an optional capability state rather than a hard failure.
 
@@ -177,7 +180,21 @@ python zai-deep-research/scripts/eval.py snapshot --dest ./.zai-deep-research-ev
 python zai-deep-research/scripts/eval.py run --client codex --baseline-skill ./.zai-deep-research-evals/skill-snapshot
 ```
 
-Artifacts are written under `./.zai-deep-research-evals/iteration-N/`. Each eval stores `outputs/`, `result.json`, `timing.json`, and `grading.json`, plus top-level `benchmark.json` and `feedback.json`.
+By default, artifacts are written under `./.zai-deep-research-evals/iteration-N/`. Override the root with `--workspace` if you want a different location.
+
+Each eval stores:
+
+- `outputs/` for generated markdown reports
+- `result.json` for raw launcher output and stderr
+- `timing.json` for duration and best-effort token counts
+- `grading.json` for automated assertion results
+
+Each iteration also writes:
+
+- `benchmark.json` for aggregated pass-rate, runtime, and token summaries
+- `feedback.json` as a human-review stub for comments that automation cannot grade
+
+`benchmark.json` keeps token statistics as `null` when the backend does not expose token usage.
 
 Read [zai-deep-research/references/EVALS.md](./zai-deep-research/references/EVALS.md) for the full workflow and benchmark interpretation guidance.
 

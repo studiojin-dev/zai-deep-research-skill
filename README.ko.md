@@ -95,6 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-ski
 ```
 
 실제 복사 전에 source 와 destination 을 먼저 확인하고 싶으면 `--dry-run` 을 사용해 주세요.
+기존 설치를 의도적으로 덮어써야 할 때만 `--force` 를 사용해 주세요.
 
 ### 선택적 native layout
 
@@ -157,7 +158,9 @@ python zai-deep-research/scripts/run.py "Compare the latest open-source browser 
 자동화나 eval harness 에서는 `--json` 을 사용해 주세요. 기본 텍스트 출력은 그대로 유지되고, JSON 모드는 opt-in 입니다.
 
 - `--validate --json` 은 validation 상태, 감지한 MCP 이름, 누락 MCP, vector memory 가능 여부, duration 을 반환합니다.
-- 일반 `--json` 실행은 status, client, session id, report path, iteration count, clarification questions, duration, best-effort token usage 를 반환합니다.
+- 일반 `--json` 실행은 `success`, `clarification_required`, `error` 중 하나의 status 와 함께 client, session id, report path, iteration count, clarification questions, duration, best-effort token usage 를 반환합니다.
+- 추가 질문이 필요하면 exit code `2` 로 종료하고, `report_path` 는 비워 두며, 막힌 질문은 `clarification_questions` 로 돌려줍니다.
+- 선택한 backend 가 안정적인 usage metadata 를 주지 않으면 `token_usage` 는 `null` 일 수 있습니다.
 
 vector memory 의존성이 없으면 validation 은 hard failure 대신 optional capability 상태로 보고합니다.
 
@@ -177,7 +180,21 @@ python zai-deep-research/scripts/eval.py snapshot --dest ./.zai-deep-research-ev
 python zai-deep-research/scripts/eval.py run --client codex --baseline-skill ./.zai-deep-research-evals/skill-snapshot
 ```
 
-아티팩트는 `./.zai-deep-research-evals/iteration-N/` 아래에 생성됩니다. 각 eval 에는 `outputs/`, `result.json`, `timing.json`, `grading.json` 이 생기고, 최상위에는 `benchmark.json`, `feedback.json` 이 생성됩니다.
+기본 아티팩트 루트는 `./.zai-deep-research-evals/iteration-N/` 이고, 다른 위치를 쓰고 싶으면 `--workspace` 로 바꿀 수 있습니다.
+
+각 eval 에는 다음이 생성됩니다.
+
+- `outputs/`: 생성된 markdown 보고서
+- `result.json`: raw launcher 출력과 stderr
+- `timing.json`: duration 과 best-effort token 수
+- `grading.json`: 자동 assertion 결과
+
+각 iteration 최상위에는 다음이 생성됩니다.
+
+- `benchmark.json`: pass rate, runtime, token 집계 요약
+- `feedback.json`: 자동 채점으로 잡히지 않는 내용을 사람이 적는 review stub
+
+backend 가 token usage 를 주지 않으면 `benchmark.json` 의 token 통계는 `null` 로 남습니다.
 
 자세한 절차와 benchmark 해석 기준은 [zai-deep-research/references/EVALS.md](./zai-deep-research/references/EVALS.md)를 참고해 주세요.
 
