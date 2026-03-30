@@ -153,6 +153,12 @@ python zai-deep-research/scripts/run.py "Review the latest changes in model gate
 python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex --json
 ```
 
+환경에 따라 backend 응답이 느리다면 stage별 timeout 을 늘릴 수 있습니다.
+
+```bash
+ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex
+```
+
 ### 기계 판독용 출력
 
 자동화나 eval harness 에서는 `--json` 을 사용해 주세요. 기본 텍스트 출력은 그대로 유지되고, JSON 모드는 opt-in 입니다.

@@ -3,10 +3,17 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
+QUIET_LOGGERS = (
+    "huggingface_hub",
+    "sentence_transformers",
+    "transformers",
+)
 
 try:
     import faiss  # type: ignore
@@ -24,6 +31,37 @@ _INDEX_PATH: Path | None = None
 _METADATA_PATH: Path | None = None
 _MODEL_NAME = DEFAULT_MODEL_NAME
 _MODEL: Any = None
+
+
+def _quiet_logging() -> tuple[list[tuple[logging.Logger, int]], dict[str, str | None]]:
+    logger_states: list[tuple[logging.Logger, int]] = []
+    for name in QUIET_LOGGERS:
+        logger = logging.getLogger(name)
+        logger_states.append((logger, logger.level))
+        logger.setLevel(logging.ERROR)
+
+    env_backup = {
+        "HF_HUB_DISABLE_PROGRESS_BARS": os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS"),
+        "HF_HUB_DISABLE_TELEMETRY": os.environ.get("HF_HUB_DISABLE_TELEMETRY"),
+        "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
+    }
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    return logger_states, env_backup
+
+
+def _restore_logging(
+    logger_states: list[tuple[logging.Logger, int]],
+    env_backup: dict[str, str | None],
+) -> None:
+    for logger, level in logger_states:
+        logger.setLevel(level)
+    for key, value in env_backup.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def configure(
@@ -62,8 +100,12 @@ def _load_model() -> Any:
     if not is_available():
         return None
     if _MODEL is None:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            _MODEL = SentenceTransformer(_MODEL_NAME)
+        logger_states, env_backup = _quiet_logging()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                _MODEL = SentenceTransformer(_MODEL_NAME)
+        finally:
+            _restore_logging(logger_states, env_backup)
     return _MODEL
 
 
@@ -110,8 +152,12 @@ def add_texts(texts: list[str], metadata_items: list[dict[str, Any]]) -> None:
 
     try:
         model = _load_model()
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            embeddings = np.asarray(model.encode(texts), dtype="float32")
+        logger_states, env_backup = _quiet_logging()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                embeddings = np.asarray(model.encode(texts), dtype="float32")
+        finally:
+            _restore_logging(logger_states, env_backup)
         index = _load_index(embeddings.shape[1])
         index.add(embeddings)
         _save_index(index)
@@ -140,8 +186,12 @@ def similarity_search(query: str, k: int = 5) -> list[dict[str, Any]]:
         if index.ntotal == 0:
             return []
 
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            query_vector = np.asarray(model.encode([query]), dtype="float32")
+        logger_states, env_backup = _quiet_logging()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                query_vector = np.asarray(model.encode([query]), dtype="float32")
+        finally:
+            _restore_logging(logger_states, env_backup)
         distances, indices = index.search(query_vector, min(k, index.ntotal))
 
         results: list[dict[str, Any]] = []

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +39,11 @@ class FakeBackend:
 
 
 class RunModuleTests(unittest.TestCase):
+    def test_coerce_text_output_decodes_bytes(self) -> None:
+        self.assertEqual(run_module.coerce_text_output(b"hello"), "hello")
+        self.assertEqual(run_module.coerce_text_output("hello"), "hello")
+        self.assertEqual(run_module.coerce_text_output(None), "")
+
     def test_parse_generic_mcp_list_handles_remote_url_table(self) -> None:
         sample = """WARNING: proceeding, even though we could not update PATH
 Name        Command                                                                                    Args                    Env                                  Cwd            Status   Auth
@@ -88,6 +95,19 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
         payload = report.to_payload()
         self.assertEqual(payload["status"], "ok")
         self.assertFalse(payload["missing_mcp_names"])
+
+    def test_run_command_handles_timeout_bytes_without_crashing(self) -> None:
+        timeout = subprocess.TimeoutExpired(
+            cmd=["codex", "exec", "--skip-git-repo-check", "-"],
+            timeout=5,
+            output=b"partial stdout",
+            stderr=b"partial stderr",
+        )
+        with mock.patch.object(run_module.subprocess, "run", side_effect=timeout):
+            with self.assertRaises(run_module.LauncherError) as context:
+                run_module.run_command(["codex", "exec", "--skip-git-repo-check", "-"], cwd=REPO_ROOT)
+        self.assertIn("command timed out after", str(context.exception))
+        self.assertIn("partial stderr", str(context.exception))
 
 
 if __name__ == "__main__":

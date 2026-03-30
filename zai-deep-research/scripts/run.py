@@ -35,7 +35,7 @@ AGENT_FILES = ("planner.md", "researcher.md", "summarizer.md", "synthesizer.md")
 SUPPORTED_CLIENTS = ("auto", "codex", "claude", "opencode", "gemini")
 BACKEND_PROBE_ORDER = ("codex", "claude", "opencode", "gemini")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-COMMAND_TIMEOUT_SECONDS = 60
+COMMAND_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -92,6 +92,14 @@ class ValidationReport:
         }
 
 
+def coerce_text_output(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def format_command(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
@@ -142,8 +150,13 @@ def run_command(
     env = os.environ.copy()
     env.setdefault("NO_COLOR", "1")
     env.setdefault("TERM", "dumb")
+    env.setdefault(
+        "ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS",
+        str(COMMAND_TIMEOUT_SECONDS),
+    )
     if env_updates:
         env.update(env_updates)
+    timeout_seconds = int(env.get("ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS", timeout_seconds))
 
     try:
         result = subprocess.run(
@@ -157,8 +170,8 @@ def run_command(
             timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
-        stdout = strip_ansi((exc.stdout or "")).strip()
-        stderr = strip_ansi((exc.stderr or "")).strip()
+        stdout = strip_ansi(coerce_text_output(exc.stdout)).strip()
+        stderr = strip_ansi(coerce_text_output(exc.stderr)).strip()
         details = stderr or stdout
         message = f"command timed out after {timeout_seconds} seconds: {format_command(command)}"
         if details:
@@ -924,7 +937,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "  python scripts/run.py --validate --client codex\n"
             "  python scripts/run.py --validate --client codex --json\n"
             "  python scripts/run.py \"Compare the latest MCP servers\" --client codex\n"
-            "  python scripts/run.py \"Compare the latest MCP servers\" --client codex --json\n\n"
+            "  python scripts/run.py \"Compare the latest MCP servers\" --client codex --json\n"
+            "  ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python scripts/run.py "
+            "\"Compare the latest MCP servers\" --client codex\n\n"
             "Exit codes:\n"
             "  0  success\n"
             "  1  validation or runtime error\n"

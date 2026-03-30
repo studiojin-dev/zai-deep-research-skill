@@ -153,6 +153,12 @@ python zai-deep-research/scripts/run.py "Review the latest changes in model gate
 python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex --json
 ```
 
+If a backend is especially slow in your environment, increase the per-stage timeout with:
+
+```bash
+ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex
+```
+
 ### Machine-readable launcher output
 
 Use `--json` when you need a stable interface for automation, eval harnesses, or wrapper scripts. The payload is opt-in so existing text-mode workflows remain unchanged.
