@@ -30,12 +30,75 @@ class FakeBackend:
         self.name = "codex"
         self.display_name = "Codex CLI"
         self._names = names
+        self.prompts: list[str] = []
 
     def is_available(self) -> bool:
         return True
 
     def list_mcp_names(self, cwd: Path) -> set[str]:
         return self._names
+
+    def run_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+        progress_callback=None,
+        step_name: str | None = None,
+        iteration: int | None = None,
+    ) -> str:
+        del cwd, disabled_mcp_names, progress_callback, iteration
+        self.prompts.append(step_name or "unknown")
+        if step_name == "planner":
+            return json_dumps(
+                {
+                    "clarified_query": "q",
+                    "quality_goal": "standard",
+                    "need_user_input": False,
+                    "questions": [],
+                    "sub_questions": ["q"],
+                    "recommended_mcps": sorted(self._names),
+                }
+            )
+        if step_name == "researcher":
+            return json_dumps(
+                {
+                    "findings": [
+                        {
+                            "title": "x",
+                            "url": "https://example.com",
+                            "summary": "s",
+                            "why_it_matters": "m",
+                            "evidence_type": "web_page",
+                        }
+                    ],
+                    "knowledge_gaps": [],
+                    "comparisons_to_check": [],
+                    "counterexamples_to_check": [],
+                    "similar_cases_to_check": [],
+                }
+            )
+        if step_name == "summarizer":
+            return json_dumps(
+                {
+                    "iteration_summary_md": "summary",
+                    "knowledge_gaps": [],
+                    "comparisons_to_check": [],
+                    "counterexamples_to_check": [],
+                    "similar_cases_to_check": [],
+                    "next_queries": [],
+                }
+            )
+        if step_name == "synthesizer":
+            return "# Title\n## Research Brief\nok"
+        raise AssertionError(f"unexpected step {step_name}")
+
+
+def json_dumps(payload) -> str:
+    import json
+
+    return json.dumps(payload)
 
 
 class RunModuleTests(unittest.TestCase):
@@ -159,11 +222,14 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
             *,
             disabled_mcp_names: list[str] | None = None,
             timeout_seconds: int | None = None,
+            progress_callback=None,
+            step_name=None,
+            iteration=None,
         ) -> run_module.CodexExecOutput:
-            del prompt, cwd, timeout_seconds
+            del prompt, cwd, timeout_seconds, progress_callback, step_name, iteration
             disabled = set(disabled_mcp_names or [])
             if "web-search-zai" not in disabled:
-                return run_module.CodexExecOutput("OK", None, [])
+                return run_module.CodexExecOutput("OK", None, [], "", "")
             if "web-reader-zai" not in disabled:
                 return run_module.CodexExecOutput(
                     "OK",
@@ -171,6 +237,8 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
                     [
                         "rmcp::transport::worker: worker quit with fatal: web-reader",
                     ],
+                    "",
+                    "",
                 )
             if "zread" not in disabled:
                 return run_module.CodexExecOutput(
@@ -179,8 +247,10 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
                     [
                         "rmcp::transport::worker: worker quit with fatal: zread",
                     ],
+                    "",
+                    "",
                 )
-            return run_module.CodexExecOutput("OK", None, [])
+            return run_module.CodexExecOutput("OK", None, [], "", "")
 
         with mock.patch.object(backend, "get_mcp_transport", side_effect=fake_transport):
             with mock.patch.object(backend, "run_exec_prompt", side_effect=fake_run_exec_prompt):
@@ -198,6 +268,70 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
                 "zread": "rmcp::transport::worker: worker quit with fatal: zread",
             },
         )
+
+    def test_run_tracker_records_transitions(self) -> None:
+        tracker = run_module.RunTracker(emit_progress=False)
+        tracker.record(step_name="planner", status="running", severity="info", message="start")
+        tracker.record(step_name="planner", status="succeeded", severity="info", message="done")
+        tracker.record(step_name="researcher", status="skipped", severity="warning", message="skip", iteration=1)
+        tracker.record(step_name="finalize", status="aborted", severity="fatal", message="abort")
+        self.assertEqual(len(tracker.step_events), 4)
+        self.assertEqual(tracker.skipped_steps, 1)
+        self.assertEqual(tracker.failed_steps, 1)
+
+    def test_classify_launcher_error_marks_core_step_as_fatal(self) -> None:
+        classified = run_module.classify_launcher_error("planner", run_module.LauncherError("command timed out"))
+        self.assertEqual(classified.severity, "fatal")
+        self.assertEqual(classified.cause, "timeout")
+
+    def test_classify_launcher_error_marks_iteration_step_as_error(self) -> None:
+        classified = run_module.classify_launcher_error(
+            "researcher",
+            run_module.LauncherError("rmcp::transport::worker: worker quit with fatal: boom"),
+            iteration=1,
+        )
+        self.assertEqual(classified.severity, "error")
+        self.assertEqual(classified.cause, "mcp_transport")
+        self.assertEqual(classified.iteration, 1)
+
+    def test_run_returns_step_events_and_summary(self) -> None:
+        config = run_module.load_config(None)
+        backend = FakeBackend(
+            {
+                config.mcp_servers.search,
+                config.mcp_servers.reader,
+                config.mcp_servers.vision,
+                config.mcp_servers.repository,
+            }
+        )
+        validation = run_module.ValidationReport(
+            client="codex",
+            configured_mcp_names=sorted(backend._names),
+            required_mcp_names=sorted(backend._names),
+            missing_mcp_names=[],
+            vector_memory_available=False,
+            issues=[],
+            duration_ms=1,
+        )
+
+        with mock.patch.object(run_module, "select_backend", return_value=backend):
+            with mock.patch.object(run_module, "validate_runtime", return_value=validation):
+                with mock.patch.object(run_module, "configure_runtime", return_value=None):
+                    with mock.patch.object(run_module, "memory_init_memory", return_value=None):
+                        with mock.patch.object(run_module, "memory_save_iteration", return_value=None):
+                            with mock.patch.object(run_module, "maybe_index_iteration_summary", return_value=None):
+                                with mock.patch.object(run_module, "save_final_report", return_value=REPO_ROOT / "research.md"):
+                                    result = run_module.run("q", client="codex")
+
+        self.assertEqual(result["status"], "success")
+        self.assertIn("step_events", result)
+        self.assertIn("run_summary", result)
+        self.assertEqual(result["final_decision"], "completed")
+        self.assertEqual(result["run_summary"]["successful_iteration_count"], 1)
+        statuses = [(event["step_name"], event["status"]) for event in result["step_events"]]
+        self.assertIn(("planner", "running"), statuses)
+        self.assertIn(("planner", "succeeded"), statuses)
+        self.assertIn(("researcher", "succeeded"), statuses)
 
 
 if __name__ == "__main__":

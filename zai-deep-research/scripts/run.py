@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import shutil
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,10 @@ COMMAND_TIMEOUT_SECONDS = 300
 CODEX_MCP_PROBE_TIMEOUT_SECONDS = 30
 CODEX_REASONING_EFFORT = "medium"
 REMOTE_MCP_TRANSPORTS = {"streamable_http", "http", "sse"}
+HEARTBEAT_INTERVAL_SECONDS = 30
+STALLED_AFTER_SECONDS = 45
+CONSECUTIVE_ITERATION_FAILURE_LIMIT = 2
+CORE_STEP_NAMES = {"planner", "synthesizer", "finalize"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,8 @@ class CodexExecOutput:
     assistant_text: str
     usage: dict[str, Any] | None
     rmcp_errors: list[str]
+    raw_stdout: str
+    raw_stderr: str
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,9 @@ class ClientBackend:
         cwd: Path,
         *,
         disabled_mcp_names: list[str] | None = None,
+        progress_callback: Any | None = None,
+        step_name: str | None = None,
+        iteration: int | None = None,
     ) -> str:
         raise NotImplementedError
 
@@ -80,6 +92,22 @@ class ClientBackend:
 
 class LauncherError(RuntimeError):
     """Expected launcher/runtime failures that should surface cleanly to users."""
+
+
+@dataclass(frozen=True)
+class ClassifiedRunError(RuntimeError):
+    step_name: str
+    severity: str
+    message: str
+    iteration: int | None = None
+    cause: str | None = None
+
+    def __str__(self) -> str:
+        location = f"{self.step_name}"
+        if self.iteration is not None:
+            location = f"{location} iteration={self.iteration}"
+        suffix = f" cause={self.cause}" if self.cause else ""
+        return f"{location}: {self.message}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -199,6 +227,43 @@ def format_unavailable_mcp_note(disabled_mcp_names: list[str] | None) -> str:
 def codex_mcp_enabled_override(name: str, enabled: bool) -> str:
     value = "true" if enabled else "false"
     return f"mcp_servers.{name}.enabled={value}"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def classify_launcher_error(
+    step_name: str,
+    exc: Exception,
+    *,
+    iteration: int | None = None,
+) -> ClassifiedRunError:
+    message = str(exc)
+    severity = "fatal" if step_name in CORE_STEP_NAMES else "error"
+    cause = "runtime"
+    lowered = message.lower()
+    if "timed out" in lowered:
+        cause = "timeout"
+    elif "malformed structured output" in lowered or "failed to parse json" in lowered:
+        cause = "structured_output"
+    elif "mcp transport" in lowered or "rmcp::transport::worker" in lowered:
+        cause = "mcp_transport"
+        if step_name not in CORE_STEP_NAMES:
+            severity = "error"
+    elif "invalid skill configuration" in lowered:
+        cause = "validation"
+        severity = "fatal"
+    elif "could not be executed" in lowered or "not available on path" in lowered:
+        cause = "backend_unavailable"
+        severity = "fatal"
+    return ClassifiedRunError(
+        step_name=step_name,
+        severity=severity,
+        message=message,
+        iteration=iteration,
+        cause=cause,
+    )
 
 
 def build_session_id(query: str) -> str:
@@ -436,8 +501,93 @@ def emit_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def emit_progress_line(message: str) -> None:
+    print(message, flush=True)
+
+
 def elapsed_ms(start_time: float) -> int:
     return int((time.monotonic() - start_time) * 1000)
+
+
+class RunTracker:
+    def __init__(self, *, emit_progress: bool) -> None:
+        self.emit_progress = emit_progress
+        self.step_events: list[dict[str, Any]] = []
+        self.skipped_steps = 0
+        self.failed_steps = 0
+        self.last_message = "initialized"
+
+    def record(
+        self,
+        *,
+        step_name: str,
+        status: str,
+        severity: str,
+        message: str,
+        iteration: int | None = None,
+        started_at: str | None = None,
+        ended_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        event = {
+            "step_name": step_name,
+            "iteration": iteration,
+            "status": status,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_ms": duration_ms,
+            "severity": severity,
+            "message": message,
+        }
+        self.step_events.append(event)
+        self.last_message = message
+        if status == "skipped":
+            self.skipped_steps += 1
+        elif status in {"failed", "aborted"}:
+            self.failed_steps += 1
+
+        if not self.emit_progress:
+            return
+
+        status_labels = {
+            "running": "STARTED",
+            "succeeded": "COMPLETE",
+            "heartbeat": "HEARTBEAT",
+            "skipped": "SKIPPED",
+            "failed": "FAILED",
+            "aborted": "ABORTED",
+        }
+        prefix = status_labels.get(status, status.upper())
+        parts = [prefix, step_name]
+        if iteration is not None:
+            parts.append(f"iteration={iteration}")
+        if duration_ms is not None:
+            parts.append(f"duration_ms={duration_ms}")
+        parts.append(f"severity={severity}")
+        parts.append(message)
+        emit_progress_line(" | ".join(parts))
+
+    def heartbeat(
+        self,
+        *,
+        step_name: str,
+        message: str,
+        elapsed_seconds: int,
+        iteration: int | None = None,
+    ) -> None:
+        self.record(
+            step_name=step_name,
+            status="heartbeat",
+            severity="warning" if "stalled" in message.lower() else "info",
+            message=(
+                f"elapsed={elapsed_seconds}s; skipped={self.skipped_steps}; "
+                f"failed={self.failed_steps}; last={message}"
+            ),
+            iteration=iteration,
+            started_at=None,
+            ended_at=utc_now_iso(),
+            duration_ms=elapsed_seconds * 1000,
+        )
 
 
 def configure_runtime(config: SkillConfig) -> None:
@@ -624,32 +774,116 @@ class CodexBackend(ClientBackend):
         *,
         disabled_mcp_names: list[str] | None = None,
         timeout_seconds: int | None = None,
+        progress_callback: Any | None = None,
+        step_name: str | None = None,
+        iteration: int | None = None,
     ) -> CodexExecOutput:
-        env_updates: dict[str, str] | None = None
-        if timeout_seconds is not None:
-            env_updates = {
-                "ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS": str(timeout_seconds)
-            }
+        env = os.environ.copy()
+        env.setdefault("NO_COLOR", "1")
+        env.setdefault("TERM", "dumb")
+        effective_timeout = timeout_seconds or int(
+            env.get("ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS", COMMAND_TIMEOUT_SECONDS)
+        )
+        env["ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS"] = str(effective_timeout)
+        command = self.build_exec_command(disabled_mcp_names)
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        assert process.stderr is not None
+        process.stdin.write(prompt)
+        process.stdin.close()
 
-        try:
-            result = run_command(
-                self.build_exec_command(disabled_mcp_names),
-                cwd=cwd,
-                input_text=prompt,
-                env_updates=env_updates,
-            )
-        except LauncherError as exc:
-            rmcp_errors = extract_rmcp_fatal_lines(str(exc))
-            if rmcp_errors:
-                raise LauncherError(
-                    "codex encountered MCP transport failures while starting this run:\n"
-                    + "\n".join(rmcp_errors)
-                ) from exc
-            raise
+        output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
 
-        rmcp_errors = extract_rmcp_fatal_lines(f"{result.stderr}\n{result.stdout}")
-        if result.returncode != 0:
-            details = result.stderr or result.stdout or "unknown codex exec error"
+        def reader_thread(stream: Any, source: str) -> None:
+            try:
+                for line in stream:
+                    output_queue.put((source, line))
+            finally:
+                output_queue.put((source, None))
+
+        stdout_thread = threading.Thread(target=reader_thread, args=(process.stdout, "stdout"), daemon=True)
+        stderr_thread = threading.Thread(target=reader_thread, args=(process.stderr, "stderr"), daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
+
+        open_streams = {"stdout", "stderr"}
+        started = time.monotonic()
+        last_activity = started
+        last_heartbeat = started
+
+        while open_streams:
+            now = time.monotonic()
+            elapsed = now - started
+            idle = now - last_activity
+            if elapsed > effective_timeout:
+                process.kill()
+                message = (
+                    f"command timed out after {effective_timeout} seconds: {format_command(command)}"
+                )
+                details = "\n".join((stderr_lines or stdout_lines)[-20:]).strip()
+                if details:
+                    message = f"{message}\n{details}"
+                raise LauncherError(message)
+
+            heartbeat_due = now - last_heartbeat >= HEARTBEAT_INTERVAL_SECONDS
+            if heartbeat_due and progress_callback and step_name:
+                state = "stalled" if idle >= STALLED_AFTER_SECONDS else "waiting"
+                progress_callback(
+                    event_type="heartbeat",
+                    step_name=step_name,
+                    iteration=iteration,
+                    severity="warning" if state == "stalled" else "info",
+                    message=f"{state}; no new output for {int(idle)}s",
+                    elapsed_seconds=int(elapsed),
+                )
+                last_heartbeat = now
+
+            try:
+                source, line = output_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+
+            if line is None:
+                open_streams.discard(source)
+                continue
+
+            stripped = strip_ansi(line.rstrip("\n"))
+            if source == "stdout":
+                stdout_lines.append(stripped)
+            else:
+                stderr_lines.append(stripped)
+
+            if stripped:
+                last_activity = time.monotonic()
+                rmcp_errors = extract_rmcp_fatal_lines(stripped)
+                if rmcp_errors and progress_callback and step_name:
+                    progress_callback(
+                        event_type="heartbeat",
+                        step_name=step_name,
+                        iteration=iteration,
+                        severity="warning",
+                        message=rmcp_errors[0],
+                        elapsed_seconds=int(last_activity - started),
+                    )
+
+        returncode = process.wait()
+        stdout = "\n".join(stdout_lines).strip()
+        stderr = "\n".join(stderr_lines).strip()
+        rmcp_errors = extract_rmcp_fatal_lines(f"{stderr}\n{stdout}")
+        if returncode != 0:
+            details = stderr or stdout or "unknown codex exec error"
             if rmcp_errors:
                 details = (
                     "MCP transport failures:\n"
@@ -658,11 +892,13 @@ class CodexBackend(ClientBackend):
                     + details
                 )
             raise LauncherError(f"{self.name} exec failed: {details}")
-        assistant_text, usage = parse_codex_exec_json(result.stdout)
+        assistant_text, usage = parse_codex_exec_json(stdout)
         return CodexExecOutput(
             assistant_text=normalize_assistant_text(assistant_text),
             usage=usage,
             rmcp_errors=rmcp_errors,
+            raw_stdout=stdout,
+            raw_stderr=stderr,
         )
 
     def run_prompt(
@@ -671,11 +907,17 @@ class CodexBackend(ClientBackend):
         cwd: Path,
         *,
         disabled_mcp_names: list[str] | None = None,
+        progress_callback: Any | None = None,
+        step_name: str | None = None,
+        iteration: int | None = None,
     ) -> str:
         return self.run_exec_prompt(
             prompt,
             cwd,
             disabled_mcp_names=disabled_mcp_names,
+            progress_callback=progress_callback,
+            step_name=step_name,
+            iteration=iteration,
         ).assistant_text
 
     def list_mcp_names(self, cwd: Path) -> set[str]:
@@ -706,6 +948,9 @@ class ClaudeBackend(ClientBackend):
         cwd: Path,
         *,
         disabled_mcp_names: list[str] | None = None,
+        progress_callback: Any | None = None,
+        step_name: str | None = None,
+        iteration: int | None = None,
     ) -> str:
         result = run_command(
             [
@@ -742,6 +987,9 @@ class OpenCodeBackend(ClientBackend):
         cwd: Path,
         *,
         disabled_mcp_names: list[str] | None = None,
+        progress_callback: Any | None = None,
+        step_name: str | None = None,
+        iteration: int | None = None,
     ) -> str:
         result = run_command(
             [self.executable, "run", "--format", "json", "--dir", str(cwd), prompt],
@@ -770,6 +1018,9 @@ class GeminiBackend(ClientBackend):
         cwd: Path,
         *,
         disabled_mcp_names: list[str] | None = None,
+        progress_callback: Any | None = None,
+        step_name: str | None = None,
+        iteration: int | None = None,
     ) -> str:
         result = run_command(
             [self.executable, "-p", prompt, "--output-format", "json"],
@@ -1019,6 +1270,7 @@ def run(
     emit_progress: bool = False,
 ) -> dict[str, Any]:
     start_time = time.monotonic()
+    tracker = RunTracker(emit_progress=emit_progress)
     config = load_config(config_path)
     backend = select_backend(client, config.runtime)
     runtime_cwd = Path.cwd().resolve()
@@ -1047,12 +1299,28 @@ def run(
         for name in validation_report.configured_mcp_names
         if name not in disabled_mcp_names
     ]
+    preflight_started_at = utc_now_iso()
+    preflight_severity = "warning" if disabled_mcp_names else "info"
+    tracker.record(
+        step_name="preflight",
+        status="succeeded",
+        severity=preflight_severity,
+        message=(
+            f"configured={len(validation_report.configured_mcp_names)} "
+            f"active={len(active_mcp_names)} disabled={len(disabled_mcp_names)}"
+        ),
+        started_at=preflight_started_at,
+        ended_at=utc_now_iso(),
+        duration_ms=validation_report.duration_ms,
+    )
 
     configure_runtime(config)
     memory_init_memory()
 
     session_id = build_session_id(query)
     resolved_output_dir = resolve_output_dir(output_dir)
+    iteration_payloads: list[dict[str, Any]] = []
+    successful_iteration_count = 0
 
     if emit_progress:
         print(f"Client: {backend.name}", flush=True)
@@ -1069,18 +1337,138 @@ def run(
             + (", ".join(disabled_mcp_names) if disabled_mcp_names else "(none)")
         , flush=True)
 
-    planner_raw = backend.run_prompt(
-        build_planner_prompt(
-            config,
-            query,
-            disabled_mcp_names=disabled_mcp_names,
-        ),
-        runtime_cwd,
-        disabled_mcp_names=disabled_mcp_names,
-    )
-    plan = extract_json_block(planner_raw)
+    def build_error_result(error: ClassifiedRunError) -> dict[str, Any]:
+        return {
+            "status": "error",
+            "client": backend.name,
+            "session_id": session_id,
+            "report_path": None,
+            "iteration_count": len(iteration_payloads),
+            "clarification_questions": [],
+            "duration_ms": elapsed_ms(start_time),
+            "token_usage": None,
+            "configured_mcp_names": validation_report.configured_mcp_names,
+            "active_mcp_names": active_mcp_names,
+            "disabled_mcp_names": disabled_mcp_names,
+            "step_events": tracker.step_events,
+            "run_summary": {
+                "preflight": {
+                    "configured_mcp_names": validation_report.configured_mcp_names,
+                    "active_mcp_names": active_mcp_names,
+                    "disabled_mcp_names": disabled_mcp_names,
+                },
+                "successful_iteration_count": successful_iteration_count,
+                "skipped_steps": tracker.skipped_steps,
+                "failed_steps": tracker.failed_steps,
+                "severity": error.severity,
+                "failed_step": error.step_name,
+                "failed_iteration": error.iteration,
+                "abort_reason": error.message,
+            },
+            "final_decision": "aborted",
+            "issues": [str(error)],
+        }
+
+    def progress_callback(
+        *,
+        event_type: str,
+        step_name: str,
+        severity: str,
+        message: str,
+        iteration: int | None = None,
+        elapsed_seconds: int | None = None,
+    ) -> None:
+        if event_type == "heartbeat":
+            tracker.heartbeat(
+                step_name=step_name,
+                message=message,
+                elapsed_seconds=elapsed_seconds or 0,
+                iteration=iteration,
+            )
+
+    def execute_step(
+        step_name: str,
+        prompt: str,
+        *,
+        iteration: int | None = None,
+    ) -> str:
+        started_at = utc_now_iso()
+        started_monotonic = time.monotonic()
+        tracker.record(
+            step_name=step_name,
+            status="running",
+            severity="info",
+            message="step started",
+            iteration=iteration,
+            started_at=started_at,
+        )
+        try:
+            result = backend.run_prompt(
+                prompt,
+                runtime_cwd,
+                disabled_mcp_names=disabled_mcp_names,
+                progress_callback=progress_callback,
+                step_name=step_name,
+                iteration=iteration,
+            )
+        except Exception as exc:
+            classified = classify_launcher_error(step_name, exc, iteration=iteration)
+            tracker.record(
+                step_name=step_name,
+                status="failed",
+                severity=classified.severity,
+                message=classified.message,
+                iteration=iteration,
+                started_at=started_at,
+                ended_at=utc_now_iso(),
+                duration_ms=elapsed_ms(started_monotonic),
+            )
+            raise classified
+
+        tracker.record(
+            step_name=step_name,
+            status="succeeded",
+            severity="info",
+            message="step completed",
+            iteration=iteration,
+            started_at=started_at,
+            ended_at=utc_now_iso(),
+            duration_ms=elapsed_ms(started_monotonic),
+        )
+        return result
+
+    try:
+        planner_raw = execute_step(
+            "planner",
+            build_planner_prompt(
+                config,
+                query,
+                disabled_mcp_names=disabled_mcp_names,
+            ),
+        )
+        plan = extract_json_block(planner_raw)
+    except Exception as exc:
+        classified = exc if isinstance(exc, ClassifiedRunError) else classify_launcher_error("planner", exc)
+        if not isinstance(classified, ClassifiedRunError):
+            classified = classify_launcher_error("planner", Exception(str(classified)))
+        return build_error_result(classified)
 
     if plan.get("need_user_input"):
+        final_decision = "aborted"
+        run_summary = {
+            "preflight": {
+                "configured_mcp_names": validation_report.configured_mcp_names,
+                "active_mcp_names": active_mcp_names,
+                "disabled_mcp_names": disabled_mcp_names,
+            },
+            "successful_iteration_count": 0,
+            "skipped_steps": tracker.skipped_steps,
+            "failed_steps": tracker.failed_steps,
+            "severity": "info",
+            "failed_step": None,
+            "failed_iteration": None,
+            "abort_reason": "clarification_required",
+        }
         return {
             "status": "clarification_required",
             "client": backend.name,
@@ -1093,6 +1481,9 @@ def run(
             "configured_mcp_names": validation_report.configured_mcp_names,
             "active_mcp_names": active_mcp_names,
             "disabled_mcp_names": disabled_mcp_names,
+            "step_events": tracker.step_events,
+            "run_summary": run_summary,
+            "final_decision": final_decision,
         }
 
     clarified_query = plan["clarified_query"]
@@ -1107,10 +1498,10 @@ def run(
             name for name in required_mcp_names if name not in disabled_mcp_names
         ]
     pending_queries = unique_preserve_order(plan.get("sub_questions") or [clarified_query])
-    iteration_payloads: list[dict[str, Any]] = []
     prior_summaries: list[str] = []
     seen_queries: set[str] = set()
     iteration = 0
+    consecutive_iteration_failures = 0
 
     while pending_queries and iteration < max_iterations:
         current_query = pending_queries.pop(0).strip()
@@ -1120,33 +1511,69 @@ def run(
         iteration += 1
 
         memory_context = build_memory_context(current_query)
-        researcher_raw = backend.run_prompt(
-            build_researcher_prompt(
-                config=config,
-                quality_goal=quality_goal,
+        try:
+            researcher_raw = execute_step(
+                "researcher",
+                build_researcher_prompt(
+                    config=config,
+                    quality_goal=quality_goal,
+                    iteration=iteration,
+                    query=current_query,
+                    prior_summaries=prior_summaries,
+                    recommended_mcps=recommended_mcps,
+                    memory_context=memory_context,
+                    disabled_mcp_names=disabled_mcp_names,
+                ),
                 iteration=iteration,
-                query=current_query,
-                prior_summaries=prior_summaries,
-                recommended_mcps=recommended_mcps,
-                memory_context=memory_context,
-                disabled_mcp_names=disabled_mcp_names,
-            ),
-            runtime_cwd,
-            disabled_mcp_names=disabled_mcp_names,
-        )
-        researcher_payload = extract_json_block(researcher_raw)
+            )
+            researcher_payload = extract_json_block(researcher_raw)
+        except ClassifiedRunError as exc:
+            tracker.record(
+                step_name="researcher",
+                status="skipped",
+                severity="warning",
+                message=f"iteration skipped after failure: {exc.message}",
+                iteration=iteration,
+                started_at=utc_now_iso(),
+                ended_at=utc_now_iso(),
+                duration_ms=0,
+            )
+            consecutive_iteration_failures += 1
+            if consecutive_iteration_failures >= CONSECUTIVE_ITERATION_FAILURE_LIMIT:
+                break
+            continue
+        except Exception as exc:
+            raise classify_launcher_error("researcher", exc, iteration=iteration)
 
-        summarizer_raw = backend.run_prompt(
-            build_summarizer_prompt(
-                config=config,
+        try:
+            summarizer_raw = execute_step(
+                "summarizer",
+                build_summarizer_prompt(
+                    config=config,
+                    iteration=iteration,
+                    query=current_query,
+                    researcher_payload=researcher_payload,
+                ),
                 iteration=iteration,
-                query=current_query,
-                researcher_payload=researcher_payload,
-            ),
-            runtime_cwd,
-            disabled_mcp_names=disabled_mcp_names,
-        )
-        summary_payload = extract_json_block(summarizer_raw)
+            )
+            summary_payload = extract_json_block(summarizer_raw)
+        except ClassifiedRunError as exc:
+            tracker.record(
+                step_name="summarizer",
+                status="skipped",
+                severity="warning",
+                message=f"iteration skipped after failure: {exc.message}",
+                iteration=iteration,
+                started_at=utc_now_iso(),
+                ended_at=utc_now_iso(),
+                duration_ms=0,
+            )
+            consecutive_iteration_failures += 1
+            if consecutive_iteration_failures >= CONSECUTIVE_ITERATION_FAILURE_LIMIT:
+                break
+            continue
+        except Exception as exc:
+            raise classify_launcher_error("summarizer", exc, iteration=iteration)
 
         summary_md = summary_payload["iteration_summary_md"]
         findings = researcher_payload.get("findings", [])
@@ -1179,18 +1606,75 @@ def run(
         for next_query in unique_preserve_order(next_queries):
             if next_query not in seen_queries and next_query not in pending_queries:
                 pending_queries.append(next_query)
+        successful_iteration_count += 1
+        consecutive_iteration_failures = 0
 
-    final_report = backend.run_prompt(
-        build_final_synthesis_prompt(
-            config=config,
-            clarified_query=clarified_query,
-            quality_goal=quality_goal,
-            iteration_payloads=iteration_payloads,
-        ),
-        runtime_cwd,
-        disabled_mcp_names=disabled_mcp_names,
+    if successful_iteration_count == 0:
+        classified = ClassifiedRunError(
+            step_name="finalize",
+            severity="fatal",
+            message="no successful iterations were available for final synthesis",
+            cause="no_successful_iterations",
+        )
+        tracker.record(
+            step_name="finalize",
+            status="aborted",
+            severity=classified.severity,
+            message=classified.message,
+            started_at=utc_now_iso(),
+            ended_at=utc_now_iso(),
+            duration_ms=0,
+        )
+        return build_error_result(classified)
+
+    try:
+        final_report = execute_step(
+            "synthesizer",
+            build_final_synthesis_prompt(
+                config=config,
+                clarified_query=clarified_query,
+                quality_goal=quality_goal,
+                iteration_payloads=iteration_payloads,
+            ),
+        )
+    except Exception as exc:
+        classified = exc if isinstance(exc, ClassifiedRunError) else classify_launcher_error("synthesizer", exc)
+        if not isinstance(classified, ClassifiedRunError):
+            classified = classify_launcher_error("synthesizer", Exception(str(classified)))
+        return build_error_result(classified)
+    finalize_started_at = utc_now_iso()
+    tracker.record(
+        step_name="finalize",
+        status="running",
+        severity="info",
+        message="saving final report",
+        started_at=finalize_started_at,
     )
     report_path = save_final_report(session_id, resolved_output_dir, final_report)
+    tracker.record(
+        step_name="finalize",
+        status="succeeded",
+        severity="info",
+        message="final report saved",
+        started_at=finalize_started_at,
+        ended_at=utc_now_iso(),
+        duration_ms=0,
+    )
+    final_decision = "completed_with_skips" if tracker.skipped_steps else "completed"
+    run_summary = {
+        "preflight": {
+            "configured_mcp_names": validation_report.configured_mcp_names,
+            "active_mcp_names": active_mcp_names,
+            "disabled_mcp_names": disabled_mcp_names,
+        },
+        "successful_iteration_count": successful_iteration_count,
+        "skipped_steps": tracker.skipped_steps,
+        "failed_steps": tracker.failed_steps,
+        "severity": "warning" if tracker.skipped_steps else "info",
+        "failed_step": None,
+        "failed_iteration": None,
+        "abort_reason": None,
+    }
 
     return {
         "status": "success",
@@ -1204,6 +1688,9 @@ def run(
         "configured_mcp_names": validation_report.configured_mcp_names,
         "active_mcp_names": active_mcp_names,
         "disabled_mcp_names": disabled_mcp_names,
+        "step_events": tracker.step_events,
+        "run_summary": run_summary,
+        "final_decision": final_decision,
     }
 
 
@@ -1294,6 +1781,20 @@ def print_validation_report(report: ValidationReport, runtime_config: SkillConfi
 
 
 def print_run_result(result: dict[str, Any], skill_name: str) -> int:
+    if result["status"] == "error":
+        summary = result.get("run_summary", {})
+        emit_progress_line(
+            "FINAL | decision=aborted"
+            + f" | severity={summary.get('severity', 'fatal')}"
+            + f" | failed_step={summary.get('failed_step')}"
+            + (
+                f" | failed_iteration={summary.get('failed_iteration')}"
+                if summary.get("failed_iteration") is not None
+                else ""
+            )
+            + f" | {summary.get('abort_reason')}"
+        )
+        return 1
     if result["status"] == "clarification_required":
         print(f"Clarification required before {skill_name} research:\n")
         for idx, question in enumerate(result["clarification_questions"], start=1):
@@ -1301,6 +1802,10 @@ def print_run_result(result: dict[str, Any], skill_name: str) -> int:
         return 2
 
     print(f"Saved: {result['report_path']}")
+    emit_progress_line(
+        f"FINAL | decision={result.get('final_decision', 'completed')} | "
+        f"iterations={result.get('iteration_count', 0)} | saved={result['report_path']}"
+    )
     return 0
 
 
@@ -1326,7 +1831,11 @@ def main(arguments: argparse.Namespace) -> int:
     )
     if arguments.json:
         emit_json(result)
-        return 2 if result["status"] == "clarification_required" else 0
+        if result["status"] == "clarification_required":
+            return 2
+        if result["status"] == "error":
+            return 1
+        return 0
     return print_run_result(result, runtime_config.skill_name)
 
 

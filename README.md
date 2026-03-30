@@ -163,6 +163,8 @@ When the selected backend is `codex`, the launcher now forces sub-runs to use `r
 
 If the launcher detects broken remote MCP transports during a codex preflight probe, it automatically excludes those MCPs for the current run instead of waiting for the main researcher turn to hang. In text mode the launcher now prints `Configured MCPs`, `Active MCPs for this run`, and `Disabled MCPs for this run` before research starts. In JSON mode the same state is returned as `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names`.
 
+During execution, the text launcher also prints step status lines for `preflight`, `planner`, `researcher`, `summarizer`, `synthesizer`, and `finalize`. Long-running codex steps emit periodic heartbeat lines so you can distinguish "still working" from "stalled".
+
 ### Machine-readable launcher output
 
 Use `--json` when you need a stable interface for automation, eval harnesses, or wrapper scripts. The payload is opt-in so existing text-mode workflows remain unchanged.
@@ -170,6 +172,7 @@ Use `--json` when you need a stable interface for automation, eval harnesses, or
 - `--validate --json` returns validation status, configured MCP names, missing MCPs, vector memory availability, and duration.
 - normal `--json` runs return `success`, `clarification_required`, or `error` status plus client, session id, report path, iteration count, clarification questions, duration, and best-effort token usage.
 - successful or clarification JSON results also include `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names` so wrappers can see the preflight MCP state without parsing text.
+- runtime JSON results also include `step_events`, `run_summary`, and `final_decision` so callers can tell whether the run completed normally, completed with skipped iterations, or aborted.
 - when clarification is required, the launcher exits with code `2`, leaves `report_path` empty, and returns the blocking questions in `clarification_questions`.
 - `token_usage` may be `null` when the selected backend does not expose stable usage metadata.
 
