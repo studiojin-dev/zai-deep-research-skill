@@ -84,6 +84,7 @@ If you already cloned this repository:
 ```bash
 sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
 sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project --dry-run
 ```
 
 If you want a `curl | sh` flow:
@@ -92,6 +93,8 @@ If you want a `curl | sh` flow:
 curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
 curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope project
 ```
+
+Use `--dry-run` whenever you want to confirm the resolved source and destination before copying files.
 
 ### Optional native layout
 
@@ -114,9 +117,12 @@ python zai-deep-research/scripts/run.py --validate --client codex
 python zai-deep-research/scripts/run.py --validate --client claude
 python zai-deep-research/scripts/run.py --validate --client opencode
 python zai-deep-research/scripts/run.py --validate --client gemini
+python zai-deep-research/scripts/run.py --validate --client codex --json
 ```
 
 If `--client auto` is ambiguous because multiple supported CLIs are installed, rerun with an explicit backend.
+
+`codex mcp list` can include both local-command and remote-URL tables. The launcher now parses both correctly and prints the detected MCP names in text mode, which makes false negatives easier to diagnose.
 
 ### Configure storage or default client
 
@@ -143,6 +149,52 @@ python zai-deep-research/scripts/run.py "Compare the latest open-source browser 
 python zai-deep-research/scripts/run.py "Assess the risks of vendor lock-in for model gateways" --client claude --output-dir ./research
 python zai-deep-research/scripts/run.py "Analyze pricing changes" --client opencode --config ./zai-deep-research/config.json
 python zai-deep-research/scripts/run.py "Review the latest changes in model gateway pricing" --client gemini --max-iterations 3
+python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex --json
+```
+
+### Machine-readable launcher output
+
+Use `--json` when you need a stable interface for automation, eval harnesses, or wrapper scripts. The payload is opt-in so existing text-mode workflows remain unchanged.
+
+- `--validate --json` returns validation status, configured MCP names, missing MCPs, vector memory availability, and duration.
+- normal `--json` runs return status, client, session id, report path, iteration count, clarification questions, duration, and best-effort token usage.
+
+If vector memory dependencies are not installed, validation reports it as an optional capability state rather than a hard failure.
+
+## Local eval workflow
+
+The repository now ships a codex-first, web-centric eval suite under `zai-deep-research/evals/evals.json`.
+
+1. Snapshot the current skill before making changes:
+
+```bash
+python zai-deep-research/scripts/eval.py snapshot --dest ./.zai-deep-research-evals/skill-snapshot
+```
+
+2. Run the full current-vs-old comparison:
+
+```bash
+python zai-deep-research/scripts/eval.py run --client codex --baseline-skill ./.zai-deep-research-evals/skill-snapshot
+```
+
+Artifacts are written under `./.zai-deep-research-evals/iteration-N/`. Each eval stores `outputs/`, `result.json`, `timing.json`, and `grading.json`, plus top-level `benchmark.json` and `feedback.json`.
+
+Read [zai-deep-research/references/EVALS.md](./zai-deep-research/references/EVALS.md) for the full workflow and benchmark interpretation guidance.
+
+## Optional vector memory setup
+
+Vector memory is optional. The launcher still works without semantic recall.
+
+If you want it enabled, install the optional packages in your local environment with pinned versions:
+
+```bash
+python3 -m pip install "faiss-cpu==1.9.0.post1" "numpy==1.26.4" "sentence-transformers==3.4.1"
+```
+
+After installing them, rerun:
+
+```bash
+python zai-deep-research/scripts/run.py --validate --client codex
 ```
 
 ## Data Storage
@@ -164,12 +216,15 @@ zai-deep-research/
 ├── SKILL.md
 ├── agents/
 ├── assets/
+├── evals/
 ├── references/
 └── scripts/
 ```
 
 - `SKILL.md`: the portable skill contract
 - `agents/`: prompt templates for the four research stages
+- `evals/`: committed eval definitions used by `scripts/eval.py`
 - `references/CONFIG.md`: config and backend selection details
+- `references/EVALS.md`: benchmark workflow, workspace layout, and human-review guidance
 - `references/CLIENTS.md`: client-specific launcher and troubleshooting notes
-- `scripts/`: optional launcher, installer, and runtime helpers
+- `scripts/`: launcher, installer, eval harness, and runtime helpers

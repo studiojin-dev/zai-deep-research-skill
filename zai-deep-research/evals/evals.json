@@ -1,0 +1,165 @@
+{
+  "skill_name": "zai-deep-research",
+  "benchmark_target": "codex",
+  "comparison_mode": "old_skill",
+  "evals": [
+    {
+      "id": "latest-api-pricing-comparison",
+      "prompt": "Compare the latest published developer pricing pages for OpenAI API, Anthropic API, and Gemini API as of today. Produce a markdown brief with absolute dates, a Comparisons section, and direct source links.",
+      "expected_output": "A structured markdown brief comparing the latest public developer pricing information from at least three direct sources, with absolute dates and explicit source links.",
+      "assertions": [
+        "The report starts with an H1 title.",
+        "The report includes a Comparisons section.",
+        "The report includes a Sources section.",
+        "The report references OpenAI, Anthropic, and Gemini.",
+        "The report contains at least three direct source links.",
+        "The report includes at least two absolute dates."
+      ],
+      "checks": [
+        {
+          "assertion": "The run completed successfully.",
+          "type": "status_equals",
+          "value": "success"
+        },
+        {
+          "assertion": "The report starts with an H1 title.",
+          "type": "markdown_h1"
+        },
+        {
+          "assertion": "The report includes a Comparisons section.",
+          "type": "has_section",
+          "value": "Comparisons"
+        },
+        {
+          "assertion": "The report includes a Sources section.",
+          "type": "has_section",
+          "value": "Sources"
+        },
+        {
+          "assertion": "The report references OpenAI, Anthropic, and Gemini.",
+          "type": "contains_regex",
+          "value": "OpenAI|Anthropic|Gemini"
+        },
+        {
+          "assertion": "The report contains at least three direct source links.",
+          "type": "min_source_links",
+          "value": 3
+        },
+        {
+          "assertion": "The report includes at least two absolute dates.",
+          "type": "min_absolute_dates",
+          "value": 2
+        }
+      ]
+    },
+    {
+      "id": "latest-mcp-server-landscape",
+      "prompt": "Analyze the latest public information about Model Context Protocol server hosting options and browser automation MCP servers. Produce a markdown brief with key findings, comparisons, caveats, and direct source links.",
+      "expected_output": "A structured markdown brief that compares current MCP hosting or browser automation options, explicitly includes caveats, and links directly to the sources.",
+      "assertions": [
+        "The report includes Key Findings, Comparisons, Counterexamples and Caveats, and Sources sections.",
+        "The report mentions Model Context Protocol or MCP explicitly.",
+        "The report contains at least three direct source links.",
+        "The report includes at least one absolute date."
+      ],
+      "checks": [
+        {
+          "assertion": "The run completed successfully.",
+          "type": "status_equals",
+          "value": "success"
+        },
+        {
+          "assertion": "The report starts with an H1 title.",
+          "type": "markdown_h1"
+        },
+        {
+          "assertion": "The report includes a Key Findings section.",
+          "type": "has_section",
+          "value": "Key Findings"
+        },
+        {
+          "assertion": "The report includes a Comparisons section.",
+          "type": "has_section",
+          "value": "Comparisons"
+        },
+        {
+          "assertion": "The report includes a Counterexamples and Caveats section.",
+          "type": "has_section",
+          "value": "Counterexamples and Caveats"
+        },
+        {
+          "assertion": "The report includes a Sources section.",
+          "type": "has_section",
+          "value": "Sources"
+        },
+        {
+          "assertion": "The report mentions Model Context Protocol or MCP explicitly.",
+          "type": "contains_regex",
+          "value": "Model Context Protocol|\\bMCP\\b"
+        },
+        {
+          "assertion": "The report contains at least three direct source links.",
+          "type": "min_source_links",
+          "value": 3
+        },
+        {
+          "assertion": "The report includes at least one absolute date.",
+          "type": "min_absolute_dates",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "conflicting-guidance-brief",
+      "prompt": "Research a current topic where vendor documentation or announcements could reasonably disagree or evolve quickly in the AI tooling ecosystem. Produce a markdown brief that highlights uncertainty, caveats, open questions, and direct source links with absolute dates.",
+      "expected_output": "A structured markdown brief that surfaces conflicting or evolving guidance, calls out uncertainty clearly, includes open questions, and links directly to the cited sources.",
+      "assertions": [
+        "The report includes Counterexamples and Caveats, Open Questions, and Sources sections.",
+        "The report explicitly mentions uncertainty or conflicting guidance.",
+        "The report contains at least three direct source links.",
+        "The report includes at least one absolute date."
+      ],
+      "checks": [
+        {
+          "assertion": "The run completed successfully.",
+          "type": "status_equals",
+          "value": "success"
+        },
+        {
+          "assertion": "The report starts with an H1 title.",
+          "type": "markdown_h1"
+        },
+        {
+          "assertion": "The report includes a Counterexamples and Caveats section.",
+          "type": "has_section",
+          "value": "Counterexamples and Caveats"
+        },
+        {
+          "assertion": "The report includes an Open Questions section.",
+          "type": "has_section",
+          "value": "Open Questions"
+        },
+        {
+          "assertion": "The report includes a Sources section.",
+          "type": "has_section",
+          "value": "Sources"
+        },
+        {
+          "assertion": "The report explicitly mentions uncertainty or conflicting guidance.",
+          "type": "contains_regex",
+          "value": "uncertain|uncertainty|conflict|conflicting|caveat"
+        },
+        {
+          "assertion": "The report contains at least three direct source links.",
+          "type": "min_source_links",
+          "value": 3
+        },
+        {
+          "assertion": "The report includes at least one absolute date.",
+          "type": "min_absolute_dates",
+          "value": 1
+        }
+      ]
+    }
+  ]
+}

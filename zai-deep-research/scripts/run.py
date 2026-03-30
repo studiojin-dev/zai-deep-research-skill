@@ -8,6 +8,7 @@ import shutil
 import shlex
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,33 @@ class ClientBackend:
 
 class LauncherError(RuntimeError):
     """Expected launcher/runtime failures that should surface cleanly to users."""
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    client: str
+    configured_mcp_names: list[str]
+    required_mcp_names: list[str]
+    missing_mcp_names: list[str]
+    vector_memory_available: bool
+    issues: list[str]
+    duration_ms: int
+
+    @property
+    def is_ok(self) -> bool:
+        return not self.issues
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "status": "ok" if self.is_ok else "error",
+            "client": self.client,
+            "configured_mcp_names": self.configured_mcp_names,
+            "required_mcp_names": self.required_mcp_names,
+            "missing_mcp_names": self.missing_mcp_names,
+            "vector_memory_available": self.vector_memory_available,
+            "issues": self.issues,
+            "duration_ms": self.duration_ms,
+        }
 
 
 def format_command(command: list[str]) -> str:
@@ -267,18 +295,23 @@ def parse_generic_mcp_list(raw_output: str) -> set[str]:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(("Name", "Configured MCP servers", "MCP servers")):
+        if stripped.startswith(
+            ("WARNING:", "Checking MCP server health", "Health check", "Name", "Configured MCP servers", "MCP servers")
+        ):
             continue
-        stripped = stripped.lstrip("+-*")
-        stripped = stripped.lstrip("✓✗•")
-        stripped = stripped.strip()
-        if not stripped or set(stripped) == {"-"}:
+        normalized = stripped.lstrip("+-*").lstrip("✓✗•").strip()
+        if not normalized or set(normalized) == {"-"}:
+            continue
+        if re.match(r"(?i)^name\s{2,}", normalized):
             continue
 
-        if ":" in stripped:
-            name = stripped.split(":", 1)[0].strip()
+        column_parts = re.split(r"\s{2,}", normalized, maxsplit=1)
+        if column_parts and column_parts[0]:
+            name = column_parts[0].strip()
+        elif "://" not in normalized and ":" in normalized:
+            name = normalized.split(":", 1)[0].strip()
         else:
-            name = stripped.split()[0]
+            name = normalized.split()[0]
 
         if name.lower() in {"name", "server", "status"}:
             continue
@@ -306,6 +339,14 @@ def resolve_output_dir(output_dir: str | None) -> Path:
         path = (Path.cwd().resolve() / "research").resolve()
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def emit_json(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def elapsed_ms(start_time: float) -> int:
+    return int((time.monotonic() - start_time) * 1000)
 
 
 def configure_runtime(config: SkillConfig) -> None:
@@ -659,8 +700,16 @@ def select_backend(client_override: str | None, runtime: RuntimeConfig) -> Clien
     )
 
 
-def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> list[str]:
+def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> ValidationReport:
+    start_time = time.monotonic()
     issues: list[str] = []
+    configured_mcp_names: list[str] = []
+    required_mcp_names = [
+        config.mcp_servers.search,
+        config.mcp_servers.reader,
+        config.mcp_servers.vision,
+        config.mcp_servers.repository,
+    ]
     if config.skill_name != DEFAULT_SKILL_NAME:
         issues.append(
             f"skill_name must be '{DEFAULT_SKILL_NAME}', got '{config.skill_name}'"
@@ -683,37 +732,53 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
             if unresolved in rendered:
                 issues.append(f"unresolved placeholder {unresolved} in {path}")
 
-        for server_name in (
-            config.mcp_servers.search,
-            config.mcp_servers.reader,
-            config.mcp_servers.vision,
-            config.mcp_servers.repository,
-        ):
+        for server_name in required_mcp_names:
             if server_name not in rendered:
                 issues.append(f"{path} does not mention MCP server '{server_name}'")
 
     if not backend.is_available():
         issues.append(f"selected client '{backend.name}' is not available on PATH")
-        return issues
+        return ValidationReport(
+            client=backend.name,
+            configured_mcp_names=[],
+            required_mcp_names=required_mcp_names,
+            missing_mcp_names=required_mcp_names,
+            vector_memory_available=vector_is_available(),
+            issues=issues,
+            duration_ms=elapsed_ms(start_time),
+        )
 
     try:
-        configured_mcp_names = backend.list_mcp_names(cwd)
+        configured_mcp_names = sorted(backend.list_mcp_names(cwd))
     except LauncherError as exc:
         issues.append(str(exc))
-        return issues
+        return ValidationReport(
+            client=backend.name,
+            configured_mcp_names=[],
+            required_mcp_names=required_mcp_names,
+            missing_mcp_names=required_mcp_names,
+            vector_memory_available=vector_is_available(),
+            issues=issues,
+            duration_ms=elapsed_ms(start_time),
+        )
 
-    for server_name in (
-        config.mcp_servers.search,
-        config.mcp_servers.reader,
-        config.mcp_servers.vision,
-        config.mcp_servers.repository,
-    ):
+    missing_mcp_names: list[str] = []
+    for server_name in required_mcp_names:
         if server_name not in configured_mcp_names:
+            missing_mcp_names.append(server_name)
             issues.append(
                 f"{backend.display_name} does not have MCP server '{server_name}' configured"
             )
 
-    return issues
+    return ValidationReport(
+        client=backend.name,
+        configured_mcp_names=configured_mcp_names,
+        required_mcp_names=required_mcp_names,
+        missing_mcp_names=missing_mcp_names,
+        vector_memory_available=vector_is_available(),
+        issues=issues,
+        duration_ms=elapsed_ms(start_time),
+    )
 
 
 def run(
@@ -722,14 +787,15 @@ def run(
     output_dir: str | None = None,
     config_path: str | None = None,
     client: str | None = None,
-) -> int:
+) -> dict[str, Any]:
+    start_time = time.monotonic()
     config = load_config(config_path)
     backend = select_backend(client, config.runtime)
     runtime_cwd = Path.cwd().resolve()
 
-    validation_issues = validate_runtime(config, backend, runtime_cwd)
-    if validation_issues:
-        raise LauncherError("invalid skill configuration:\n- " + "\n- ".join(validation_issues))
+    validation_report = validate_runtime(config, backend, runtime_cwd)
+    if not validation_report.is_ok:
+        raise LauncherError("invalid skill configuration:\n- " + "\n- ".join(validation_report.issues))
 
     configure_runtime(config)
     memory_init_memory()
@@ -741,10 +807,16 @@ def run(
     plan = extract_json_block(planner_raw)
 
     if plan.get("need_user_input"):
-        print(f"Clarification required before {config.skill_name} research:\n")
-        for idx, question in enumerate(plan.get("questions", []), start=1):
-            print(f"{idx}. {question}")
-        return 2
+        return {
+            "status": "clarification_required",
+            "client": backend.name,
+            "session_id": session_id,
+            "report_path": None,
+            "iteration_count": 0,
+            "clarification_questions": list(plan.get("questions", [])),
+            "duration_ms": elapsed_ms(start_time),
+            "token_usage": None,
+        }
 
     clarified_query = plan["clarified_query"]
     quality_goal = plan["quality_goal"]
@@ -831,13 +903,34 @@ def run(
     )
     report_path = save_final_report(session_id, resolved_output_dir, final_report)
 
-    print(f"Client: {backend.name}")
-    print(f"Saved: {report_path}")
-    return 0
+    return {
+        "status": "success",
+        "client": backend.name,
+        "session_id": session_id,
+        "report_path": str(report_path),
+        "iteration_count": len(iteration_payloads),
+        "clarification_questions": [],
+        "duration_ms": elapsed_ms(start_time),
+        "token_usage": None,
+    }
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the zai-deep-research skill")
+    parser = argparse.ArgumentParser(
+        description="Run the zai-deep-research skill",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python scripts/run.py --validate --client codex\n"
+            "  python scripts/run.py --validate --client codex --json\n"
+            "  python scripts/run.py \"Compare the latest MCP servers\" --client codex\n"
+            "  python scripts/run.py \"Compare the latest MCP servers\" --client codex --json\n\n"
+            "Exit codes:\n"
+            "  0  success\n"
+            "  1  validation or runtime error\n"
+            "  2  clarification required before research can continue\n"
+        ),
+    )
     parser.add_argument("query", nargs="*", help="Research query")
     parser.add_argument(
         "--max-iterations",
@@ -868,56 +961,109 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Validate config, agent templates, backend selection, and MCP wiring without running research.",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON to stdout. Errors stay on stderr unless a JSON payload can be produced.",
+    )
     args = parser.parse_args(argv)
     if not args.validate and not args.query:
         parser.error("query is required unless --validate is used")
     return args
 
 
-def main(argv: list[str]) -> int:
-    arguments = parse_args(argv)
+def print_validation_report(report: ValidationReport, runtime_config: SkillConfig) -> None:
+    if report.is_ok:
+        print(f"Validation passed for {runtime_config.skill_name}")
+    else:
+        print("Validation failed:")
+        for issue in report.issues:
+            print(f"- {issue}")
+    print(f"Client: {report.client}")
+    print(f"Configured MCPs: {', '.join(report.configured_mcp_names) if report.configured_mcp_names else '(none detected)'}")
+    if report.missing_mcp_names:
+        print(f"Missing MCPs: {', '.join(report.missing_mcp_names)}")
+    print(f"Memory DB: {runtime_config.storage.memory_db_path}")
+    print(f"Vector index: {runtime_config.storage.vector_index_path}")
+    print(f"Vector metadata: {runtime_config.storage.vector_metadata_path}")
+    print(
+        "Required MCP servers: "
+        f"{runtime_config.mcp_servers.search}, "
+        f"{runtime_config.mcp_servers.reader}, "
+        f"{runtime_config.mcp_servers.vision}, "
+        f"{runtime_config.mcp_servers.repository}"
+    )
+    print(
+        "Vector memory: "
+        + ("enabled" if report.vector_memory_available else "optional dependency unavailable")
+    )
+
+
+def print_run_result(result: dict[str, Any], skill_name: str) -> int:
+    if result["status"] == "clarification_required":
+        print(f"Clarification required before {skill_name} research:\n")
+        for idx, question in enumerate(result["clarification_questions"], start=1):
+            print(f"{idx}. {question}")
+        return 2
+
+    print(f"Client: {result['client']}")
+    print(f"Saved: {result['report_path']}")
+    return 0
+
+
+def main(arguments: argparse.Namespace) -> int:
     runtime_config = load_config(arguments.config)
     backend = select_backend(arguments.client, runtime_config.runtime)
 
     if arguments.validate:
-        issues = validate_runtime(runtime_config, backend, Path.cwd().resolve())
-        if issues:
-            print("Validation failed:")
-            for issue in issues:
-                print(f"- {issue}")
-            return 1
-        print(f"Validation passed for {runtime_config.skill_name}")
-        print(f"Client: {backend.name}")
-        print(f"Memory DB: {runtime_config.storage.memory_db_path}")
-        print(f"Vector index: {runtime_config.storage.vector_index_path}")
-        print(f"Vector metadata: {runtime_config.storage.vector_metadata_path}")
-        print(
-            "MCP servers: "
-            f"{runtime_config.mcp_servers.search}, "
-            f"{runtime_config.mcp_servers.reader}, "
-            f"{runtime_config.mcp_servers.vision}, "
-            f"{runtime_config.mcp_servers.repository}"
-        )
-        return 0
+        report = validate_runtime(runtime_config, backend, Path.cwd().resolve())
+        if arguments.json:
+            emit_json(report.to_payload())
+        else:
+            print_validation_report(report, runtime_config)
+        return 0 if report.is_ok else 1
 
-    return run(
+    result = run(
         " ".join(arguments.query),
         max_iterations=arguments.max_iterations,
         output_dir=arguments.output_dir,
         config_path=arguments.config,
         client=arguments.client,
     )
+    if arguments.json:
+        emit_json(result)
+        return 2 if result["status"] == "clarification_required" else 0
+    return print_run_result(result, runtime_config.skill_name)
 
 
 def cli(argv: list[str]) -> int:
+    arguments = parse_args(argv)
     try:
-        return main(argv)
+        return main(arguments)
     except LauncherError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        if arguments.json:
+            emit_json(
+                {
+                    "status": "error",
+                    "client": arguments.client,
+                    "issues": [str(exc)],
+                }
+            )
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
         return 1
     except Exception:
-        print("INTERNAL CRASH: unexpected launcher error", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        if arguments.json:
+            emit_json(
+                {
+                    "status": "error",
+                    "client": arguments.client,
+                    "issues": ["unexpected launcher error"],
+                }
+            )
+        else:
+            print("INTERNAL CRASH: unexpected launcher error", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
         return 1
 
 

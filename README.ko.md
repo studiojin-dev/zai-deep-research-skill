@@ -84,6 +84,7 @@
 ```bash
 sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
 sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project --dry-run
 ```
 
 `curl | sh` 흐름을 원하시면:
@@ -92,6 +93,8 @@ sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope
 curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
 curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope project
 ```
+
+실제 복사 전에 source 와 destination 을 먼저 확인하고 싶으면 `--dry-run` 을 사용해 주세요.
 
 ### 선택적 native layout
 
@@ -114,9 +117,12 @@ python zai-deep-research/scripts/run.py --validate --client codex
 python zai-deep-research/scripts/run.py --validate --client claude
 python zai-deep-research/scripts/run.py --validate --client opencode
 python zai-deep-research/scripts/run.py --validate --client gemini
+python zai-deep-research/scripts/run.py --validate --client codex --json
 ```
 
 지원 CLI 가 여러 개 설치되어 있어 `--client auto` 가 모호하면, 반드시 `--client` 를 명시해서 다시 실행해 주세요.
+
+`codex mcp list` 는 local command 표와 remote URL 표를 같이 출력할 수 있습니다. 런처는 이제 두 형식을 모두 올바르게 파싱하고, 텍스트 모드에서 감지한 MCP 이름을 같이 보여 줍니다.
 
 ### 저장 경로나 기본 backend 설정
 
@@ -143,6 +149,52 @@ python zai-deep-research/scripts/run.py "Compare the latest open-source browser 
 python zai-deep-research/scripts/run.py "Assess the risks of vendor lock-in for model gateways" --client claude --output-dir ./research
 python zai-deep-research/scripts/run.py "Analyze pricing changes" --client opencode --config ./zai-deep-research/config.json
 python zai-deep-research/scripts/run.py "Review the latest changes in model gateway pricing" --client gemini --max-iterations 3
+python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex --json
+```
+
+### 기계 판독용 출력
+
+자동화나 eval harness 에서는 `--json` 을 사용해 주세요. 기본 텍스트 출력은 그대로 유지되고, JSON 모드는 opt-in 입니다.
+
+- `--validate --json` 은 validation 상태, 감지한 MCP 이름, 누락 MCP, vector memory 가능 여부, duration 을 반환합니다.
+- 일반 `--json` 실행은 status, client, session id, report path, iteration count, clarification questions, duration, best-effort token usage 를 반환합니다.
+
+vector memory 의존성이 없으면 validation 은 hard failure 대신 optional capability 상태로 보고합니다.
+
+## 로컬 eval 워크플로
+
+저장소에는 codex 기준, 웹 중심 eval 세트가 `zai-deep-research/evals/evals.json` 에 포함되어 있습니다.
+
+1. 변경 전 현재 skill 을 snapshot 합니다.
+
+```bash
+python zai-deep-research/scripts/eval.py snapshot --dest ./.zai-deep-research-evals/skill-snapshot
+```
+
+2. 현재 skill 과 `old_skill` snapshot 을 비교 실행합니다.
+
+```bash
+python zai-deep-research/scripts/eval.py run --client codex --baseline-skill ./.zai-deep-research-evals/skill-snapshot
+```
+
+아티팩트는 `./.zai-deep-research-evals/iteration-N/` 아래에 생성됩니다. 각 eval 에는 `outputs/`, `result.json`, `timing.json`, `grading.json` 이 생기고, 최상위에는 `benchmark.json`, `feedback.json` 이 생성됩니다.
+
+자세한 절차와 benchmark 해석 기준은 [zai-deep-research/references/EVALS.md](./zai-deep-research/references/EVALS.md)를 참고해 주세요.
+
+## 선택적 vector memory 설정
+
+Vector memory 는 선택 사항이며, semantic recall 이 없어도 런처는 동작합니다.
+
+활성화하고 싶다면 로컬 환경에 아래 pinned 버전을 설치해 주세요.
+
+```bash
+python3 -m pip install "faiss-cpu==1.9.0.post1" "numpy==1.26.4" "sentence-transformers==3.4.1"
+```
+
+설치 후에는 다음으로 다시 확인할 수 있습니다.
+
+```bash
+python zai-deep-research/scripts/run.py --validate --client codex
 ```
 
 ## 데이터 저장소 설명
@@ -164,12 +216,15 @@ zai-deep-research/
 ├── SKILL.md
 ├── agents/
 ├── assets/
+├── evals/
 ├── references/
 └── scripts/
 ```
 
 - `SKILL.md`: 이식 가능한 스킬 계약
 - `agents/`: 네 단계 리서치 프롬프트 템플릿
+- `evals/`: `scripts/eval.py` 가 사용하는 커밋된 eval 정의
 - `references/CONFIG.md`: config 와 backend 선택 설명
+- `references/EVALS.md`: benchmark 절차, workspace 구조, human review 가이드
 - `references/CLIENTS.md`: 클라이언트별 런처와 문제 해결 메모
-- `scripts/`: 선택적 런처, 설치 스크립트, 런타임 보조 코드
+- `scripts/`: 런처, 설치 스크립트, eval harness, 런타임 보조 코드

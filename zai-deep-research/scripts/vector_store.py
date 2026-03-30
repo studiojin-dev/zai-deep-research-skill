@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -60,7 +62,8 @@ def _load_model() -> Any:
     if not is_available():
         return None
     if _MODEL is None:
-        _MODEL = SentenceTransformer(_MODEL_NAME)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            _MODEL = SentenceTransformer(_MODEL_NAME)
     return _MODEL
 
 
@@ -105,41 +108,49 @@ def add_texts(texts: list[str], metadata_items: list[dict[str, Any]]) -> None:
     if len(texts) != len(metadata_items):
         raise ValueError("texts and metadata_items must have the same length")
 
-    model = _load_model()
-    embeddings = np.asarray(model.encode(texts), dtype="float32")
-    index = _load_index(embeddings.shape[1])
-    index.add(embeddings)
-    _save_index(index)
+    try:
+        model = _load_model()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            embeddings = np.asarray(model.encode(texts), dtype="float32")
+        index = _load_index(embeddings.shape[1])
+        index.add(embeddings)
+        _save_index(index)
 
-    rows: list[dict[str, Any]] = []
-    for text, metadata in zip(texts, metadata_items, strict=True):
-        row = dict(metadata)
-        row["text"] = text
-        rows.append(row)
-    _append_metadata_rows(rows)
+        rows: list[dict[str, Any]] = []
+        for text, metadata in zip(texts, metadata_items, strict=True):
+            row = dict(metadata)
+            row["text"] = text
+            rows.append(row)
+        _append_metadata_rows(rows)
+    except Exception:  # pragma: no cover - optional dependency path
+        return
 
 
 def similarity_search(query: str, k: int = 5) -> list[dict[str, Any]]:
     if not query or not is_available():
         return []
 
-    model = _load_model()
-    metadata_rows = _load_metadata_rows()
-    if not metadata_rows:
+    try:
+        model = _load_model()
+        metadata_rows = _load_metadata_rows()
+        if not metadata_rows:
+            return []
+
+        index = _load_index(model.get_sentence_embedding_dimension())
+        if index.ntotal == 0:
+            return []
+
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            query_vector = np.asarray(model.encode([query]), dtype="float32")
+        distances, indices = index.search(query_vector, min(k, index.ntotal))
+
+        results: list[dict[str, Any]] = []
+        for distance, index_position in zip(distances[0], indices[0], strict=True):
+            if index_position < 0 or index_position >= len(metadata_rows):
+                continue
+            row = dict(metadata_rows[index_position])
+            row["distance"] = float(distance)
+            results.append(row)
+        return results
+    except Exception:  # pragma: no cover - optional dependency path
         return []
-
-    index = _load_index(model.get_sentence_embedding_dimension())
-    if index.ntotal == 0:
-        return []
-
-    query_vector = np.asarray(model.encode([query]), dtype="float32")
-    distances, indices = index.search(query_vector, min(k, index.ntotal))
-
-    results: list[dict[str, Any]] = []
-    for distance, index_position in zip(distances[0], indices[0], strict=True):
-        if index_position < 0 or index_position >= len(metadata_rows):
-            continue
-        row = dict(metadata_rows[index_position])
-        row["distance"] = float(distance)
-        results.append(row)
-    return results

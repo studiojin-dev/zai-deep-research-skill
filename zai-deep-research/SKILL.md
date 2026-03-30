@@ -20,11 +20,17 @@ Use this skill when the user needs a researched answer grounded in current web p
   - `zread`
 - The optional launcher in `scripts/run.py` currently supports `codex`, `claude`, `opencode`, and `gemini`.
 
+## Available scripts
+- `scripts/run.py` — validates MCP wiring, runs the multi-stage research workflow, and optionally emits machine-readable JSON.
+- `scripts/install.sh` — installs the skill into the shared Agent Skills path or the documented Gemini layout. Use `--dry-run` to preview the install plan first.
+- `scripts/eval.py` — snapshots the current skill, runs the committed eval suite against `with_skill` and `old_skill`, and generates grading plus benchmark artifacts.
+
 ## Default workflow
 1. Validate the selected client and MCP wiring:
 
 ```bash
 python scripts/run.py --validate --client codex
+python scripts/run.py --validate --client codex --json
 ```
 
 2. Run research with an explicit client when auto-detection is unclear:
@@ -33,6 +39,7 @@ python scripts/run.py --validate --client codex
 python scripts/run.py "your research query" --client claude
 python scripts/run.py "your research query" --client opencode --max-iterations 7
 python scripts/run.py "your research query" --client gemini --output-dir ./research
+python scripts/run.py "your research query" --client codex --json
 ```
 
 3. Let the launcher run the four prompt stages in order:
@@ -45,13 +52,17 @@ python scripts/run.py "your research query" --client gemini --output-dir ./resea
 - Always run `--validate` before first use on a new client.
 - If `auto` backend detection fails, rerun with `--client codex|claude|opencode|gemini`.
 - The launcher writes runtime state under `./.zai-deep-research` and the final report under `./research/` unless you override the paths.
+- `--json` is opt-in and keeps the default text output backward compatible.
+- Validation now shows the detected MCP names, so a false negative from `codex mcp list` parsing is easier to spot and debug.
 
 ## Gotchas
 - This is a generic Agent Skills package, but it is not generic infrastructure-free research. Without z.ai Coding Plan access and the four z.ai MCP servers, it cannot deliver its intended workflow.
 - MCP server names must match exactly unless you override them in `config.json`.
 - `scripts/run.py` is a convenience launcher, not a requirement of the skill format. Clients may differ internally, but the expected output contract stays the same: validated prerequisites, iterative evidence gathering, and a final Markdown report.
 - Vector memory is optional. If FAISS dependencies are unavailable, the launcher still runs without semantic recall.
+- The skill supports both live web research and repository-backed investigation. Use the web-centric eval suite to watch for regressions in source hygiene, caveats, and freshness handling.
 
 ## References
 - Read [references/CONFIG.md](references/CONFIG.md) when you need to change runtime storage, MCP names, or the default client backend.
 - Read [references/CLIENTS.md](references/CLIENTS.md) when you need client-specific launcher, installation, or troubleshooting details.
+- Read [references/EVALS.md](references/EVALS.md) when you need to run benchmarks, compare against an `old_skill` snapshot, or review eval artifacts.

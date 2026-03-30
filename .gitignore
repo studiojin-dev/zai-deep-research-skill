@@ -5,5 +5,6 @@
 .agents/
 .codex/
 .zai-deep-research/
+/.zai-deep-research-evals/
 /research/
 zai-deep-research/config.json

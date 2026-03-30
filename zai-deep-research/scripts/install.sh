@@ -9,16 +9,31 @@ SOURCE_DIR=""
 REPO="$DEFAULT_REPO"
 REF="main"
 FORCE="0"
+DRY_RUN="0"
 
 usage() {
   cat <<'EOF'
 Usage:
-  sh install.sh [--scope user|project] [--layout shared|gemini] [--source-dir <path>] [--repo <owner/repo>] [--ref <git-ref>] [--force]
+  sh install.sh [--scope user|project] [--layout shared|gemini] [--source-dir <path>] [--repo <owner/repo>] [--ref <git-ref>] [--force] [--dry-run]
+
+Options:
+  --scope <user|project>   Install to ~/.agents/skills or ./.agents/skills
+  --layout <shared|gemini> Choose shared Agent Skills layout or Gemini native layout
+  --source-dir <path>      Install from an existing local skill directory
+  --repo <owner/repo>      Download the skill from GitHub before installing
+  --ref <git-ref>          Git ref used with --repo (default: main)
+  --force                  Replace an existing installation at the destination
+  --dry-run                Print the resolved install plan without copying files
 
 Examples:
   sh install.sh --source-dir ./zai-deep-research --scope user
   sh install.sh --source-dir ./zai-deep-research --scope project
+  sh install.sh --source-dir ./zai-deep-research --scope project --dry-run
   curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
+
+Exit codes:
+  0  success
+  1  invalid arguments or install failure
 EOF
 }
 
@@ -73,6 +88,10 @@ while [ $# -gt 0 ]; do
       FORCE="1"
       shift
       ;;
+    --dry-run)
+      DRY_RUN="1"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -123,7 +142,11 @@ download_source() {
 
 resolve_source_dir() {
   if [ -n "$SOURCE_DIR" ]; then
-    printf '%s\n' "$(cd "$SOURCE_DIR" && pwd)"
+    [ -e "$SOURCE_DIR" ] || fail "source directory does not exist: $SOURCE_DIR"
+    [ -d "$SOURCE_DIR" ] || fail "source directory is not a directory: $SOURCE_DIR"
+    resolved="$(cd "$SOURCE_DIR" && pwd)"
+    [ -f "$resolved/SKILL.md" ] || fail "source directory does not look like a skill: $resolved"
+    printf '%s\n' "$resolved"
     return
   fi
 
@@ -140,11 +163,37 @@ cleanup_generated_files() {
   find "$target" \( -name '__pycache__' -o -name '.DS_Store' -o -name '*.pyc' \) -exec rm -rf {} + 2>/dev/null || true
 }
 
+print_install_plan() {
+  source_path="$1"
+  dest_root="$2"
+  dest_path="$3"
+  action="install"
+  if [ -e "$dest_path" ]; then
+    if [ "$FORCE" = "1" ]; then
+      action="replace"
+    else
+      action="blocked"
+    fi
+  fi
+
+  printf 'Skill: %s\n' "$SKILL_NAME"
+  printf 'Source: %s\n' "$source_path"
+  printf 'Destination root: %s\n' "$dest_root"
+  printf 'Destination path: %s\n' "$dest_path"
+  printf 'Scope: %s\n' "$SCOPE"
+  printf 'Layout: %s\n' "$LAYOUT"
+  printf 'Action: %s\n' "$action"
+}
+
 SOURCE_PATH="$(resolve_source_dir)"
-[ -f "$SOURCE_PATH/SKILL.md" ] || fail "source directory does not look like a skill: $SOURCE_PATH"
 
 DEST_ROOT="$(resolve_destination_root)"
 DEST_PATH="$DEST_ROOT/$SKILL_NAME"
+
+if [ "$DRY_RUN" = "1" ]; then
+  print_install_plan "$SOURCE_PATH" "$DEST_ROOT" "$DEST_PATH"
+  exit 0
+fi
 
 mkdir -p "$DEST_ROOT"
 
