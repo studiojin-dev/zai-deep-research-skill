@@ -3,8 +3,8 @@ set -eu
 
 SKILL_NAME="zai-deep-research"
 DEFAULT_REPO="studiojin-dev/zai-deep-research-skill"
-CLIENT="agents"
 SCOPE="user"
+LAYOUT="shared"
 SOURCE_DIR=""
 REPO="$DEFAULT_REPO"
 REF="main"
@@ -13,11 +13,12 @@ FORCE="0"
 usage() {
   cat <<'EOF'
 Usage:
-  sh install.sh [--client <name>] [--scope user|project] [--source-dir <path>] [--repo <owner/repo>] [--ref <git-ref>] [--force]
+  sh install.sh [--scope user|project] [--layout shared|gemini] [--source-dir <path>] [--repo <owner/repo>] [--ref <git-ref>] [--force]
 
 Examples:
-  sh install.sh --source-dir ./zai-deep-research --client agents --scope user
-  curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client codex --scope user
+  sh install.sh --source-dir ./zai-deep-research --scope user
+  sh install.sh --source-dir ./zai-deep-research --scope project
+  curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
 EOF
 }
 
@@ -28,14 +29,29 @@ fail() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --client)
-      [ $# -ge 2 ] || fail "--client requires a value"
-      CLIENT="$2"
-      shift 2
-      ;;
     --scope)
       [ $# -ge 2 ] || fail "--scope requires a value"
       SCOPE="$2"
+      shift 2
+      ;;
+    --layout)
+      [ $# -ge 2 ] || fail "--layout requires a value"
+      LAYOUT="$2"
+      shift 2
+      ;;
+    --client)
+      [ $# -ge 2 ] || fail "--client requires a value"
+      case "$2" in
+        agents|shared)
+          LAYOUT="shared"
+          ;;
+        gemini)
+          LAYOUT="gemini"
+          ;;
+        *)
+          fail "--client $2 is no longer inferred to a native path; use --layout shared or install manually"
+          ;;
+      esac
       shift 2
       ;;
     --source-dir)
@@ -76,11 +92,17 @@ resolve_destination_root() {
     fail "--scope must be either user or project"
   fi
 
-  if [ "$CLIENT" = "agents" ]; then
-    printf '%s/.agents/skills\n' "$base"
-  else
-    printf '%s/.%s/skills\n' "$base" "$CLIENT"
-  fi
+  case "$LAYOUT" in
+    shared)
+      printf '%s/.agents/skills\n' "$base"
+      ;;
+    gemini)
+      printf '%s/.gemini/skills\n' "$base"
+      ;;
+    *)
+      fail "--layout must be either shared or gemini"
+      ;;
+  esac
 }
 
 download_source() {
@@ -138,4 +160,4 @@ cp -R "$SOURCE_PATH" "$DEST_PATH"
 cleanup_generated_files "$DEST_PATH"
 
 printf 'Installed %s to %s\n' "$SKILL_NAME" "$DEST_PATH"
-printf 'Next step: python %s/scripts/run.py --validate\n' "$DEST_PATH"
+printf 'Recommended next step: python %s/scripts/run.py --validate --client <codex|claude|opencode|gemini>\n' "$DEST_PATH"

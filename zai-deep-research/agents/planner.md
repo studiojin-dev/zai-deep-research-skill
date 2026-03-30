@@ -7,7 +7,8 @@ Available MCP servers for this skill:
 - `__MCP_REPOSITORY_NAME__` for repository, code, and documentation investigation
 
 Requirements:
-- You are running inside Codex CLI.
+- You are running inside an Agent Skills-compatible client with MCP support.
+- Do not assume a specific client product or shell integration.
 - Do not use the OpenAI API.
 - Decide which of the four MCP servers are likely needed before research starts.
 - Ask clarification questions only when they are necessary to avoid wasted work.

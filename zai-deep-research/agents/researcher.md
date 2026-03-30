@@ -7,7 +7,8 @@ Available MCP servers for this skill:
 - `__MCP_REPOSITORY_NAME__` for repository, code, and documentation evidence
 
 Requirements:
-- You are running inside Codex CLI.
+- You are running inside an Agent Skills-compatible client with MCP support.
+- Do not assume a specific client product or shell integration.
 - Do not use the OpenAI API.
 - Use the appropriate MCP server for each evidence type instead of guessing.
 - Prefer primary and high-credibility sources.

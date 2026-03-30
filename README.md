@@ -16,9 +16,29 @@ English documentation. For Korean documentation, please see [README.ko.md](./REA
 
 ## Overview
 
-`zai-deep-research` is an Agent Skills-compatible research skill built for people who already subscribe to the z.ai Coding Plan. It is designed around four z.ai MCP servers and uses them to perform structured, iterative deep research with planning, evidence collection, summarization, and final synthesis.
+`zai-deep-research` is a generic Agent Skills-compatible deep research skill whose hard requirements are:
 
-For users who do not have access to the z.ai Coding Plan and its MCP services, this repository is effectively not useful in practice. The skill depends on those MCP endpoints for discovery, reading, vision, and repository inspection. Without them, the workflow cannot produce its intended result.
+- z.ai Coding Plan access
+- four configured z.ai MCP servers:
+  - `web-search-zai`
+  - `web-reader-zai`
+  - `vision-zai`
+  - `zread`
+
+The skill itself is not tied to one AI coding product. It is intended to work across Agent Skills-compatible clients, while the bundled Python launcher provides backend adapters for `codex`, `claude`, `opencode`, and `gemini`.
+
+Without z.ai Coding Plan access and those four MCP servers, this repository is not useful in practice.
+
+## Support Matrix
+
+| Client | Skill package | `scripts/run.py` launcher | Notes |
+| --- | --- | --- | --- |
+| `codex` | Supported | Supported | One supported backend, not the identity of the skill |
+| `claude` | Supported | Supported | Launcher uses non-interactive print mode |
+| `opencode` | Supported | Supported | Launcher uses `opencode run` |
+| `gemini` | Supported | Supported | Launcher uses headless prompt mode |
+
+Runtime behavior can differ slightly by client because each CLI exposes different non-interactive and MCP interfaces. The external contract stays the same: validate prerequisites, gather evidence iteratively, and produce a final Markdown report.
 
 ## How It Works
 
@@ -29,11 +49,17 @@ The skill coordinates four prompt templates under `agents/`:
 - `summarizer` turns each research pass into a concise iteration summary and proposes the next queries.
 - `synthesizer` writes the final markdown report.
 
-The execution logic lives in `zai-deep-research/scripts/run.py`. Runtime configuration lives in `config.json` when present, or falls back to sensible defaults. By default, persistent state is stored under `./.zai-deep-research` in the current working directory, while final reports are written to `./research/` unless `--output-dir` is provided.
+The optional launcher lives in `zai-deep-research/scripts/run.py`. It:
+
+- auto-detects or accepts an explicit client backend
+- validates that the required MCP names are configured in that client
+- runs the four stages iteratively
+- stores runtime state under `./.zai-deep-research` by default
+- writes the final report under `./research/` by default
 
 ## Before You Install
 
-Please configure the four z.ai MCP servers in your agent first. The names must match exactly:
+Please configure the four z.ai MCP servers in your client first. The names must match exactly unless you override them in `config.json`:
 
 | Required name | z.ai service |
 | --- | --- |
@@ -42,95 +68,94 @@ Please configure the four z.ai MCP servers in your agent first. The names must m
 | `web-reader-zai` | Web Content Reading |
 | `zread` | Zread MCP Server |
 
-Each agent product uses its own MCP configuration format. What matters for this skill is the exact server name, not the surrounding config syntax. The included validation command checks that these four names are available from your local agent runtime.
+Each client has its own MCP configuration format. What matters for this skill is the server name and the client’s ability to expose MCP tools at runtime.
 
 ## Installation
 
-### Installation script
+### Canonical shared install
 
-This repository includes `zai-deep-research/scripts/install.sh`. The installer supports:
+The recommended install target is the shared Agent Skills path:
 
-- global shared installation into `~/.agents/skills`
-- global client-specific installation into `~/.<client>/skills`
-- local project installation into `./.agents/skills` or `./.<client>/skills`
+- user scope: `~/.agents/skills`
+- workspace scope: `./.agents/skills`
 
-If you want a `curl | sh` flow, you can run:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client agents --scope user
-curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client codex --scope user
-curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client agents --scope project
-```
-
-If you already cloned this repository, you can install directly from the current checkout:
+If you already cloned this repository:
 
 ```bash
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --client agents --scope user
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --client codex --scope user
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --client agents --scope project
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project
 ```
 
-Installer behavior:
+If you want a `curl | sh` flow:
 
-- `--client agents` installs to the cross-client `.agents/skills` convention.
-- `--client codex` installs to the native Codex skills directory.
-- any other client name installs to `~/.<client>/skills` or `./.<client>/skills`.
-- `--scope user` means a user-level installation.
-- `--scope project` means installation into the current directory.
+```bash
+curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
+curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope project
+```
+
+### Optional native layout
+
+The installer only manages native layouts that are explicitly documented. Today that means:
+
+```bash
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user --layout gemini
+```
+
+For other native locations, install manually if your client requires them.
 
 ## After Installation
 
-### Validate the skill
+### Validate the selected client
 
-Please validate the skill before first use:
+Always validate before first use:
 
 ```bash
-python zai-deep-research/scripts/run.py --validate
+python zai-deep-research/scripts/run.py --validate --client codex
+python zai-deep-research/scripts/run.py --validate --client claude
+python zai-deep-research/scripts/run.py --validate --client opencode
+python zai-deep-research/scripts/run.py --validate --client gemini
 ```
 
-This command checks:
+If `--client auto` is ambiguous because multiple supported CLIs are installed, rerun with an explicit backend.
 
-- the skill name and directory wiring
-- that the `agents/*.md` templates are loaded at runtime
-- that each agent template includes the four MCP names
-- that your local agent runtime exposes the four MCP servers
+### Configure storage or default client
 
-### Configure storage
-
-Copy the example config and adjust paths when needed:
+Copy the example config if you need to change storage paths, MCP names, or the default launcher backend:
 
 ```bash
 cp zai-deep-research/assets/config.example.json zai-deep-research/config.json
 ```
 
-The storage section controls:
+Important config fields:
 
+- `runtime.client`: default launcher backend (`auto`, `codex`, `claude`, `opencode`, `gemini`)
 - `memory_db_path`: SQLite database for iteration summaries, reports, and artifacts
 - `vector_index_path`: FAISS index file for semantic retrieval
 - `vector_metadata_path`: JSONL metadata paired with the FAISS vectors
 - `data_dir`: base directory for runtime state
 
-Relative storage paths are resolved from the current working directory. If you run the skill from `~/realrepo`, the default storage root becomes `~/realrepo/.zai-deep-research`.
+Relative storage paths resolve from the current working directory.
 
-### Run the skill
+### Run the launcher
 
 ```bash
-python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers"
-python zai-deep-research/scripts/run.py "Assess the risks of vendor lock-in for model gateways" --output-dir ./research
-python zai-deep-research/scripts/run.py "Analyze pricing changes" --config ./zai-deep-research/config.json
+python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex
+python zai-deep-research/scripts/run.py "Assess the risks of vendor lock-in for model gateways" --client claude --output-dir ./research
+python zai-deep-research/scripts/run.py "Analyze pricing changes" --client opencode --config ./zai-deep-research/config.json
+python zai-deep-research/scripts/run.py "Review the latest changes in model gateway pricing" --client gemini --max-iterations 3
 ```
 
 ## Data Storage
 
-By default, the skill stores runtime data under `./.zai-deep-research` in the current working directory.
+By default, runtime data is stored under `./.zai-deep-research` in the current working directory.
 
-For example, if you run Codex from `~/realrepo`, the default storage paths become:
+For example, if you run the launcher from `~/realrepo`, the default storage paths become:
 
 - `~/realrepo/.zai-deep-research/memory.sqlite`
 - `~/realrepo/.zai-deep-research/vector.index`
 - `~/realrepo/.zai-deep-research/vector.jsonl`
 
-The final markdown report is written to `./research/` in the current working directory by default. If you prefer a different directory, please pass `--output-dir`.
+The final Markdown report is written to `./research/` in the current working directory by default. If you prefer a different directory, pass `--output-dir`.
 
 ## Repository Structure
 
@@ -143,4 +168,8 @@ zai-deep-research/
 └── scripts/
 ```
 
-This layout follows the Agent Skills specification, which expects scripts in `scripts/`, supporting documentation in `references/`, and reusable resources in `assets/`.
+- `SKILL.md`: the portable skill contract
+- `agents/`: prompt templates for the four research stages
+- `references/CONFIG.md`: config and backend selection details
+- `references/CLIENTS.md`: client-specific launcher and troubleshooting notes
+- `scripts/`: optional launcher, installer, and runtime helpers

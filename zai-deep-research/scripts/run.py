@@ -4,8 +4,12 @@ import argparse
 import json
 import os
 import re
+import shutil
+import shlex
 import subprocess
 import sys
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +18,7 @@ SCRIPTS_DIR = SKILL_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from config import DEFAULT_SKILL_NAME, SkillConfig, load_config
+from config import DEFAULT_SKILL_NAME, RuntimeConfig, SkillConfig, load_config
 from memory import configure as configure_memory
 from memory import init_memory as memory_init_memory
 from memory import save_artifact as memory_save_artifact
@@ -27,6 +31,41 @@ from vector_store import similarity_search as vector_similarity_search
 
 DEFAULT_MAX_ITERATIONS = 7
 AGENT_FILES = ("planner.md", "researcher.md", "summarizer.md", "synthesizer.md")
+SUPPORTED_CLIENTS = ("auto", "codex", "claude", "opencode", "gemini")
+BACKEND_PROBE_ORDER = ("codex", "claude", "opencode", "gemini")
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+COMMAND_TIMEOUT_SECONDS = 60
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    stdout: str
+    stderr: str
+    returncode: int
+
+
+@dataclass(frozen=True)
+class ClientBackend:
+    name: str
+    executable: str
+    display_name: str
+
+    def is_available(self) -> bool:
+        return shutil.which(self.executable) is not None
+
+    def run_prompt(self, prompt: str, cwd: Path) -> str:
+        raise NotImplementedError
+
+    def list_mcp_names(self, cwd: Path) -> set[str]:
+        raise NotImplementedError
+
+
+class LauncherError(RuntimeError):
+    """Expected launcher/runtime failures that should surface cleanly to users."""
+
+
+def format_command(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
 
 
 def safe_json_loads(text: str) -> Any:
@@ -60,57 +99,204 @@ def slugify(value: str) -> str:
     return value[:80] or "zai_deep_research_report"
 
 
-def run_codex(prompt: str) -> str:
-    result = subprocess.run(
-        ["codex", "exec", "--skip-git-repo-check", "-"],
-        input=prompt,
-        text=True,
-        capture_output=True,
-        check=False,
-        cwd=str(SKILL_ROOT),
-    )
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        stdout = result.stdout.strip()
-        details = stderr or stdout or "unknown codex exec error"
-        raise RuntimeError(f"codex exec failed: {details}")
-
-    return result.stdout.strip()
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
 
 
-def list_codex_mcp_names() -> set[str]:
-    result = subprocess.run(
-        ["codex", "mcp", "list"],
-        text=True,
-        capture_output=True,
-        check=False,
-        cwd=str(SKILL_ROOT),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "codex mcp list failed: "
-            + (result.stderr.strip() or result.stdout.strip() or "unknown error")
+def run_command(
+    command: list[str],
+    *,
+    cwd: Path,
+    input_text: str | None = None,
+    env_updates: dict[str, str] | None = None,
+    timeout_seconds: int = COMMAND_TIMEOUT_SECONDS,
+) -> CommandResult:
+    env = os.environ.copy()
+    env.setdefault("NO_COLOR", "1")
+    env.setdefault("TERM", "dumb")
+    if env_updates:
+        env.update(env_updates)
+
+    try:
+        result = subprocess.run(
+            command,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd=str(cwd),
+            env=env,
+            timeout=timeout_seconds,
         )
+    except subprocess.TimeoutExpired as exc:
+        stdout = strip_ansi((exc.stdout or "")).strip()
+        stderr = strip_ansi((exc.stderr or "")).strip()
+        details = stderr or stdout
+        message = f"command timed out after {timeout_seconds} seconds: {format_command(command)}"
+        if details:
+            message = f"{message}\n{details}"
+        raise LauncherError(message) from exc
+    except OSError as exc:
+        raise LauncherError(
+            f"command could not be executed: {format_command(command)} ({exc})"
+        ) from exc
+    return CommandResult(
+        stdout=strip_ansi(result.stdout).strip(),
+        stderr=strip_ansi(result.stderr).strip(),
+        returncode=result.returncode,
+    )
 
-    names: set[str] = set()
-    for line in result.stdout.splitlines():
+
+def normalize_assistant_text(raw_output: str) -> str:
+    text = strip_ansi(raw_output).strip()
+    if not text:
+        return text
+
+    candidate = text
+    if candidate.startswith("```"):
+        match = re.search(r"```(?:json|markdown|md|text)?\s*(.*?)```", candidate, re.DOTALL)
+        if match:
+            candidate = match.group(1).strip()
+
+    if candidate.startswith("{") or candidate.startswith("["):
+        try:
+            payload = safe_json_loads(candidate)
+        except ValueError:
+            return text
+        extracted = extract_text_from_payload(payload)
+        return extracted if extracted is not None else text
+
+    return text
+
+
+def load_structured_payload(raw_output: str, *, backend_name: str) -> Any:
+    text = strip_ansi(raw_output).strip()
+    if not text:
+        raise LauncherError(f"{backend_name} returned empty structured output")
+
+    candidate = text
+    if candidate.startswith("```"):
+        match = re.search(r"```(?:json|markdown|md|text)?\s*(.*?)```", candidate, re.DOTALL)
+        if match:
+            candidate = match.group(1).strip()
+
+    if candidate.startswith("["):
+        try:
+            return safe_json_loads(candidate)
+        except ValueError as exc:
+            raise LauncherError(f"{backend_name} returned malformed structured output: {exc}") from exc
+
+    if candidate.startswith("{") and "\n" not in candidate:
+        try:
+            return safe_json_loads(candidate)
+        except ValueError as exc:
+            raise LauncherError(f"{backend_name} returned malformed structured output: {exc}") from exc
+
+    payloads: list[Any] = []
+    for line_no, line in enumerate(candidate.splitlines(), start=1):
         stripped = line.strip()
-        if not stripped or stripped.startswith("Name") or set(stripped) == {"-"}:
+        if not stripped:
             continue
-        parts = stripped.split()
-        if parts:
-            names.add(parts[0])
+        try:
+            payloads.append(json.loads(stripped))
+        except json.JSONDecodeError as exc:
+            raise LauncherError(
+                f"{backend_name} returned malformed structured output on line {line_no}: {exc}"
+            ) from exc
+
+    if not payloads:
+        raise LauncherError(f"{backend_name} returned empty structured output")
+    return payloads
+
+
+def extract_structured_assistant_text(raw_output: str, *, backend_name: str) -> str:
+    payload = load_structured_payload(raw_output, backend_name=backend_name)
+    extracted = extract_text_from_payload(payload)
+    if not extracted:
+        raise LauncherError(f"{backend_name} returned structured output without assistant text")
+    return extracted
+
+
+def extract_text_from_payload(payload: Any) -> str | None:
+    if isinstance(payload, str):
+        return payload.strip()
+
+    if isinstance(payload, dict):
+        payload_type = str(payload.get("type", "")).lower()
+        if payload_type in {"text", "output_text", "assistant_text"}:
+            value = payload.get("text") or payload.get("value")
+            extracted = extract_text_from_payload(value)
+            if extracted:
+                return extracted
+
+        for key in (
+            "response",
+            "text",
+            "content",
+            "message",
+            "result",
+            "output",
+            "delta",
+            "value",
+            "events",
+            "parts",
+        ):
+            value = payload.get(key)
+            extracted = extract_text_from_payload(value)
+            if extracted:
+                return extracted
+
+        messages = payload.get("messages")
+        if isinstance(messages, list):
+            extracted = extract_text_from_payload(messages)
+            if extracted:
+                return extracted
+
+    if isinstance(payload, list):
+        for item in reversed(payload):
+            extracted = extract_text_from_payload(item)
+            if extracted:
+                return extracted
+
+    return None
+
+
+def parse_generic_mcp_list(raw_output: str) -> set[str]:
+    names: set[str] = set()
+    for line in strip_ansi(raw_output).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(("Name", "Configured MCP servers", "MCP servers")):
+            continue
+        stripped = stripped.lstrip("+-*")
+        stripped = stripped.lstrip("✓✗•")
+        stripped = stripped.strip()
+        if not stripped or set(stripped) == {"-"}:
+            continue
+
+        if ":" in stripped:
+            name = stripped.split(":", 1)[0].strip()
+        else:
+            name = stripped.split()[0]
+
+        if name.lower() in {"name", "server", "status"}:
+            continue
+        if name:
+            names.add(name)
     return names
 
 
 def extract_json_block(text: str) -> Any:
-    text = text.strip()
-    if text.startswith("```"):
-        match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    normalized = normalize_assistant_text(text)
+    if normalized.startswith("```"):
+        match = re.search(r"```(?:json)?\s*(.*?)```", normalized, re.DOTALL)
         if match:
-            text = match.group(1).strip()
-    return safe_json_loads(text)
+            normalized = match.group(1).strip()
+    try:
+        return safe_json_loads(normalized)
+    except ValueError as exc:
+        raise LauncherError(str(exc)) from exc
 
 
 def resolve_output_dir(output_dir: str | None) -> Path:
@@ -279,7 +465,201 @@ def save_final_report(session_id: str, output_dir: Path, report_md: str) -> Path
     return path
 
 
-def validate_runtime(config: SkillConfig) -> list[str]:
+class CodexBackend(ClientBackend):
+    def run_prompt(self, prompt: str, cwd: Path) -> str:
+        result = run_command(
+            [self.executable, "exec", "--skip-git-repo-check", "-"],
+            cwd=cwd,
+            input_text=prompt,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown codex exec error"
+            raise LauncherError(f"{self.name} exec failed: {details}")
+        return normalize_assistant_text(result.stdout)
+
+    def list_mcp_names(self, cwd: Path) -> set[str]:
+        result = run_command(
+            [self.executable, "mcp", "list"],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown mcp list error"
+            raise LauncherError(f"{self.name} mcp list failed: {details}")
+        return parse_generic_mcp_list(result.stdout)
+
+
+class ClaudeBackend(ClientBackend):
+    def run_prompt(self, prompt: str, cwd: Path) -> str:
+        result = run_command(
+            [
+                self.executable,
+                "-p",
+                prompt,
+                "--permission-mode",
+                "bypassPermissions",
+                "--add-dir",
+                str(cwd),
+            ],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown claude exec error"
+            raise LauncherError(f"{self.name} print mode failed: {details}")
+        return normalize_assistant_text(result.stdout)
+
+    def list_mcp_names(self, cwd: Path) -> set[str]:
+        result = run_command(
+            [self.executable, "mcp", "list"],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown mcp list error"
+            raise LauncherError(f"{self.name} mcp list failed: {details}")
+        return parse_generic_mcp_list(result.stdout)
+
+
+class OpenCodeBackend(ClientBackend):
+    def run_prompt(self, prompt: str, cwd: Path) -> str:
+        result = run_command(
+            [self.executable, "run", "--format", "json", "--dir", str(cwd), prompt],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown opencode run error"
+            raise LauncherError(f"{self.name} run failed: {details}")
+        return extract_structured_assistant_text(result.stdout, backend_name=self.name)
+
+    def list_mcp_names(self, cwd: Path) -> set[str]:
+        result = run_command(
+            [self.executable, "mcp", "list"],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown mcp list error"
+            raise LauncherError(f"{self.name} mcp list failed: {details}")
+        return parse_generic_mcp_list(result.stdout)
+
+
+class GeminiBackend(ClientBackend):
+    def run_prompt(self, prompt: str, cwd: Path) -> str:
+        result = run_command(
+            [self.executable, "-p", prompt, "--output-format", "json"],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown gemini headless error"
+            raise LauncherError(f"{self.name} prompt failed: {details}")
+
+        try:
+            payload = safe_json_loads(result.stdout)
+        except ValueError as exc:
+            raise LauncherError(f"{self.name} returned malformed structured output: {exc}") from exc
+        response = payload.get("response")
+        if not isinstance(response, str) or not response.strip():
+            details = payload.get("error") or payload
+            raise LauncherError(f"{self.name} returned no response text: {details}")
+        return normalize_assistant_text(response)
+
+    def list_mcp_names(self, cwd: Path) -> set[str]:
+        result = run_command(
+            [self.executable, "mcp", "list"],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown mcp list error"
+            raise LauncherError(f"{self.name} mcp list failed: {details}")
+        return parse_generic_mcp_list(result.stdout)
+
+
+BACKENDS: dict[str, ClientBackend] = {
+    "codex": CodexBackend("codex", "codex", "Codex CLI"),
+    "claude": ClaudeBackend("claude", "claude", "Claude Code"),
+    "opencode": OpenCodeBackend("opencode", "opencode", "OpenCode"),
+    "gemini": GeminiBackend("gemini", "gemini", "Gemini CLI"),
+}
+
+
+def get_backend(client_name: str) -> ClientBackend:
+    try:
+        return BACKENDS[client_name]
+    except KeyError as exc:
+        raise LauncherError(
+            f"unsupported client '{client_name}'; choose from {', '.join(SUPPORTED_CLIENTS)}"
+        ) from exc
+
+
+def find_parent_process_client(max_depth: int = 6) -> str | None:
+    pid = os.getppid()
+    for _ in range(max_depth):
+        if pid <= 1:
+            return None
+        try:
+            result = run_command(
+                ["ps", "-p", str(pid), "-o", "ppid=", "-o", "comm="],
+                cwd=Path.cwd(),
+            )
+        except LauncherError:
+            return None
+        if result.returncode != 0 or not result.stdout:
+            return None
+        line = result.stdout.splitlines()[0].strip()
+        if not line:
+            return None
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            return None
+        parent_pid, command = parts
+        command_name = Path(command).name.lower()
+        for client in BACKEND_PROBE_ORDER:
+            if client in command_name:
+                return client
+        try:
+            pid = int(parent_pid)
+        except ValueError:
+            return None
+    return None
+
+
+def probe_installed_clients() -> list[str]:
+    detected: list[str] = []
+    for client in BACKEND_PROBE_ORDER:
+        if BACKENDS[client].is_available():
+            detected.append(client)
+    return detected
+
+
+def select_backend(client_override: str | None, runtime: RuntimeConfig) -> ClientBackend:
+    requested = (client_override or runtime.client).strip()
+    if requested and requested != "auto":
+        backend = get_backend(requested)
+        if not backend.is_available():
+            raise LauncherError(
+                f"requested client '{requested}' is not available on PATH; pass a different "
+                "--client or update config.runtime.client"
+            )
+        return backend
+
+    parent_client = find_parent_process_client()
+    if parent_client:
+        backend = get_backend(parent_client)
+        if backend.is_available():
+            return backend
+
+    installed_clients = probe_installed_clients()
+    if len(installed_clients) == 1:
+        return get_backend(installed_clients[0])
+    if len(installed_clients) > 1:
+        raise LauncherError(
+            "auto-detection found multiple installed clients "
+            f"({', '.join(installed_clients)}); pass --client explicitly"
+        )
+    raise LauncherError(
+        "could not auto-detect a supported client; install one of "
+        f"{', '.join(BACKEND_PROBE_ORDER)} or pass --client explicitly"
+    )
+
+
+def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> list[str]:
     issues: list[str] = []
     if config.skill_name != DEFAULT_SKILL_NAME:
         issues.append(
@@ -312,7 +692,16 @@ def validate_runtime(config: SkillConfig) -> list[str]:
             if server_name not in rendered:
                 issues.append(f"{path} does not mention MCP server '{server_name}'")
 
-    configured_mcp_names = list_codex_mcp_names()
+    if not backend.is_available():
+        issues.append(f"selected client '{backend.name}' is not available on PATH")
+        return issues
+
+    try:
+        configured_mcp_names = backend.list_mcp_names(cwd)
+    except LauncherError as exc:
+        issues.append(str(exc))
+        return issues
+
     for server_name in (
         config.mcp_servers.search,
         config.mcp_servers.reader,
@@ -320,7 +709,9 @@ def validate_runtime(config: SkillConfig) -> list[str]:
         config.mcp_servers.repository,
     ):
         if server_name not in configured_mcp_names:
-            issues.append(f"Codex MCP server '{server_name}' is not configured locally")
+            issues.append(
+                f"{backend.display_name} does not have MCP server '{server_name}' configured"
+            )
 
     return issues
 
@@ -330,19 +721,23 @@ def run(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     output_dir: str | None = None,
     config_path: str | None = None,
+    client: str | None = None,
 ) -> int:
     config = load_config(config_path)
+    backend = select_backend(client, config.runtime)
+    runtime_cwd = Path.cwd().resolve()
+
+    validation_issues = validate_runtime(config, backend, runtime_cwd)
+    if validation_issues:
+        raise LauncherError("invalid skill configuration:\n- " + "\n- ".join(validation_issues))
+
     configure_runtime(config)
     memory_init_memory()
-
-    validation_issues = validate_runtime(config)
-    if validation_issues:
-        raise RuntimeError("invalid skill configuration:\n- " + "\n- ".join(validation_issues))
 
     session_id = build_session_id(query)
     resolved_output_dir = resolve_output_dir(output_dir)
 
-    planner_raw = run_codex(build_planner_prompt(config, query))
+    planner_raw = backend.run_prompt(build_planner_prompt(config, query), runtime_cwd)
     plan = extract_json_block(planner_raw)
 
     if plan.get("need_user_input"):
@@ -368,7 +763,7 @@ def run(
         iteration += 1
 
         memory_context = build_memory_context(current_query)
-        researcher_raw = run_codex(
+        researcher_raw = backend.run_prompt(
             build_researcher_prompt(
                 config=config,
                 quality_goal=quality_goal,
@@ -377,17 +772,19 @@ def run(
                 prior_summaries=prior_summaries,
                 recommended_mcps=recommended_mcps,
                 memory_context=memory_context,
-            )
+            ),
+            runtime_cwd,
         )
         researcher_payload = extract_json_block(researcher_raw)
 
-        summarizer_raw = run_codex(
+        summarizer_raw = backend.run_prompt(
             build_summarizer_prompt(
                 config=config,
                 iteration=iteration,
                 query=current_query,
                 researcher_payload=researcher_payload,
-            )
+            ),
+            runtime_cwd,
         )
         summary_payload = extract_json_block(summarizer_raw)
 
@@ -423,16 +820,18 @@ def run(
             if next_query not in seen_queries and next_query not in pending_queries:
                 pending_queries.append(next_query)
 
-    final_report = run_codex(
+    final_report = backend.run_prompt(
         build_final_synthesis_prompt(
             config=config,
             clarified_query=clarified_query,
             quality_goal=quality_goal,
             iteration_payloads=iteration_payloads,
-        )
+        ),
+        runtime_cwd,
     )
     report_path = save_final_report(session_id, resolved_output_dir, final_report)
 
+    print(f"Client: {backend.name}")
     print(f"Saved: {report_path}")
     return 0
 
@@ -459,9 +858,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Optional JSON config path. Defaults to ./config.json if present.",
     )
     parser.add_argument(
+        "--client",
+        choices=SUPPORTED_CLIENTS,
+        default=None,
+        help="Runtime client backend. Defaults to config.runtime.client or auto-detection.",
+    )
+    parser.add_argument(
         "--validate",
         action="store_true",
-        help="Validate config, agent templates, and prompt wiring without running research.",
+        help="Validate config, agent templates, backend selection, and MCP wiring without running research.",
     )
     args = parser.parse_args(argv)
     if not args.validate and not args.query:
@@ -469,18 +874,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-if __name__ == "__main__":
-    arguments = parse_args(sys.argv[1:])
+def main(argv: list[str]) -> int:
+    arguments = parse_args(argv)
+    runtime_config = load_config(arguments.config)
+    backend = select_backend(arguments.client, runtime_config.runtime)
+
     if arguments.validate:
-        runtime_config = load_config(arguments.config)
-        configure_runtime(runtime_config)
-        issues = validate_runtime(runtime_config)
+        issues = validate_runtime(runtime_config, backend, Path.cwd().resolve())
         if issues:
             print("Validation failed:")
             for issue in issues:
                 print(f"- {issue}")
-            sys.exit(1)
+            return 1
         print(f"Validation passed for {runtime_config.skill_name}")
+        print(f"Client: {backend.name}")
         print(f"Memory DB: {runtime_config.storage.memory_db_path}")
         print(f"Vector index: {runtime_config.storage.vector_index_path}")
         print(f"Vector metadata: {runtime_config.storage.vector_metadata_path}")
@@ -491,13 +898,28 @@ if __name__ == "__main__":
             f"{runtime_config.mcp_servers.vision}, "
             f"{runtime_config.mcp_servers.repository}"
         )
-        sys.exit(0)
+        return 0
 
-    sys.exit(
-        run(
-            " ".join(arguments.query),
-            max_iterations=arguments.max_iterations,
-            output_dir=arguments.output_dir,
-            config_path=arguments.config,
-        )
+    return run(
+        " ".join(arguments.query),
+        max_iterations=arguments.max_iterations,
+        output_dir=arguments.output_dir,
+        config_path=arguments.config,
+        client=arguments.client,
     )
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        return main(argv)
+    except LauncherError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        print("INTERNAL CRASH: unexpected launcher error", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

@@ -14,6 +14,7 @@ DEFAULT_MCP_SERVERS = {
     "vision": "vision-zai",
     "repository": "zread",
 }
+SUPPORTED_CLIENTS = ("auto", "codex", "claude", "opencode", "gemini")
 
 
 def _default_data_dir() -> Path:
@@ -46,10 +47,16 @@ class McpConfig:
 
 
 @dataclass(frozen=True)
+class RuntimeConfig:
+    client: str
+
+
+@dataclass(frozen=True)
 class SkillConfig:
     skill_name: str
     storage: StorageConfig
     mcp_servers: McpConfig
+    runtime: RuntimeConfig
     config_path: Path | None
 
 
@@ -67,6 +74,9 @@ def _build_default_payload() -> dict[str, Any]:
     data_dir = _default_data_dir()
     return {
         "skill_name": DEFAULT_SKILL_NAME,
+        "runtime": {
+            "client": "auto",
+        },
         "storage": {
             "data_dir": str(data_dir),
             "memory_db_path": str(data_dir / "memory.sqlite"),
@@ -99,6 +109,13 @@ def load_config(config_path: str | None = None) -> SkillConfig:
             f"skill_name must be '{DEFAULT_SKILL_NAME}' to match the directory and spec"
         )
 
+    runtime_data = payload.get("runtime", {})
+    client = str(runtime_data.get("client", "auto")).strip() or "auto"
+    if client not in SUPPORTED_CLIENTS:
+        raise ValueError(
+            f"runtime.client must be one of {', '.join(SUPPORTED_CLIENTS)}, got '{client}'"
+        )
+
     storage_data = payload["storage"]
     data_dir = _expand_path(storage_data.get("data_dir"), runtime_cwd)
     if data_dir is None:
@@ -106,8 +123,10 @@ def load_config(config_path: str | None = None) -> SkillConfig:
 
     storage = StorageConfig(
         data_dir=data_dir,
-        memory_db_path=_expand_path(storage_data.get("memory_db_path"), data_dir) or data_dir / "memory.sqlite",
-        vector_index_path=_expand_path(storage_data.get("vector_index_path"), data_dir) or data_dir / "vector.index",
+        memory_db_path=_expand_path(storage_data.get("memory_db_path"), data_dir)
+        or data_dir / "memory.sqlite",
+        vector_index_path=_expand_path(storage_data.get("vector_index_path"), data_dir)
+        or data_dir / "vector.index",
         vector_metadata_path=_expand_path(storage_data.get("vector_metadata_path"), data_dir)
         or data_dir / "vector.jsonl",
     )
@@ -124,5 +143,6 @@ def load_config(config_path: str | None = None) -> SkillConfig:
         skill_name=skill_name,
         storage=storage,
         mcp_servers=mcp_servers,
+        runtime=RuntimeConfig(client=client),
         config_path=resolved_config_path,
     )

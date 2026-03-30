@@ -16,9 +16,29 @@
 
 ## 설명
 
-`zai-deep-research` 는 z.ai Coding Plan 구독자를 위해 만든 Agent Skills 호환 딥 리서치 스킬입니다. 네 개의 z.ai MCP 서버를 중심으로 설계되어 있으며, 요청 정리, 근거 수집, 반복 요약, 최종 보고서 작성까지 단계적으로 수행합니다.
+`zai-deep-research` 는 다음 전제를 갖는 범용 Agent Skills 호환 딥 리서치 스킬입니다.
 
-반대로 말씀드리면, z.ai Coding Plan 과 해당 MCP 서비스에 접근할 수 없는 사용자에게는 이 저장소가 실질적으로 쓸모가 없습니다. 이 스킬의 핵심 기능은 z.ai 의 검색, 읽기, 비전, 저장소 분석 MCP 에 의존하기 때문에, 그 접근 권한이 없으면 의도한 워크플로우가 성립하지 않습니다.
+- z.ai Coding Plan 접근 권한
+- 설정된 z.ai MCP 서버 4개
+  - `web-search-zai`
+  - `web-reader-zai`
+  - `vision-zai`
+  - `zread`
+
+스킬 자체는 특정 코딩 에이전트 하나에 묶여 있지 않습니다. 다만 번들된 Python 런처는 현재 `codex`, `claude`, `opencode`, `gemini` backend 를 지원합니다.
+
+반대로 말씀드리면, z.ai Coding Plan 과 위 MCP 4개가 없으면 이 저장소는 실질적으로 쓸 수 없습니다.
+
+## 지원 매트릭스
+
+| Client | Skill package | `scripts/run.py` 런처 | 비고 |
+| --- | --- | --- | --- |
+| `codex` | 지원 | 지원 | 지원 backend 중 하나일 뿐입니다 |
+| `claude` | 지원 | 지원 | non-interactive print mode 사용 |
+| `opencode` | 지원 | 지원 | `opencode run` 사용 |
+| `gemini` | 지원 | 지원 | headless prompt mode 사용 |
+
+클라이언트마다 non-interactive 실행 방식과 MCP 인터페이스가 달라 세부 동작은 조금씩 다를 수 있습니다. 다만 외부 계약은 같습니다. 먼저 전제를 검증하고, 근거를 반복적으로 수집한 뒤, 최종 마크다운 보고서를 만듭니다.
 
 ## 동작 원리
 
@@ -29,11 +49,17 @@
 - `summarizer` 는 각 조사 라운드를 요약하고 다음 질의를 제안합니다.
 - `synthesizer` 는 최종 마크다운 보고서를 작성합니다.
 
-실행 로직은 `zai-deep-research/scripts/run.py` 에 있고, 런타임 설정은 `config.json` 이 있으면 이를 우선 사용합니다. 기본적으로 지속 데이터는 현재 작업 디렉터리 아래 `./.zai-deep-research` 에 저장되며, 최종 보고서는 `--output-dir` 를 지정하지 않으면 `./research/` 에 생성됩니다.
+선택적 런처인 `zai-deep-research/scripts/run.py` 는 다음을 담당합니다.
+
+- backend 자동 감지 또는 명시 선택
+- 선택한 클라이언트에 필요한 MCP 이름 4개가 잡혀 있는지 검증
+- 네 단계 프롬프트를 반복 실행
+- 기본적으로 `./.zai-deep-research` 에 런타임 상태 저장
+- 기본적으로 `./research/` 에 최종 보고서 저장
 
 ## 설치 전 유의사항
 
-먼저 사용하는 에이전트에 z.ai MCP 네 개를 등록해 두셔야 합니다. 이름은 반드시 아래와 정확히 일치해야 합니다.
+먼저 사용하는 클라이언트에 z.ai MCP 네 개를 등록해 두셔야 합니다. 이름은 `config.json` 으로 바꾸지 않는 한 아래와 정확히 일치해야 합니다.
 
 | 필수 이름 | z.ai 서비스 |
 | --- | --- |
@@ -42,89 +68,88 @@
 | `web-reader-zai` | Web Content Reading |
 | `zread` | Zread MCP Server |
 
-에이전트마다 MCP 설정 파일 형식은 다를 수 있습니다. 이 스킬에서 중요한 것은 설정 문법 자체가 아니라 서버 이름이 정확히 맞는지입니다. 포함된 검증 명령은 현재 로컬 에이전트 런타임에 이 네 이름이 실제로 잡혀 있는지 확인해 줍니다.
+클라이언트마다 MCP 설정 형식은 다르지만, 이 스킬에서 중요한 것은 서버 이름과 런타임에서 MCP 도구를 실제로 노출할 수 있는지입니다.
 
 ## 설치 방법
 
-### 설치 스크립트
+### 권장 공유 설치 경로
 
-이 저장소에는 `zai-deep-research/scripts/install.sh` 가 포함되어 있습니다. 설치 스크립트는 다음 시나리오를 지원합니다.
+이 저장소는 공유 Agent Skills 경로를 기본 설치 대상으로 권장합니다.
 
-- `~/.agents/skills` 에 전역 공유 설치
-- `~/.<client>/skills` 에 클라이언트별 전역 설치
-- `./.agents/skills` 또는 `./.<client>/skills` 에 현재 프로젝트 로컬 설치
+- 사용자 전역: `~/.agents/skills`
+- 워크스페이스: `./.agents/skills`
 
-`curl | sh` 형식으로 설치하려면 아래와 같이 실행하시면 됩니다.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client agents --scope user
-curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client codex --scope user
-curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --client agents --scope project
-```
-
-이미 저장소를 clone 해 두셨다면 현재 체크아웃에서 바로 설치하실 수 있습니다.
+이미 저장소를 clone 해 두셨다면:
 
 ```bash
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --client agents --scope user
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --client codex --scope user
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --client agents --scope project
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project
 ```
 
-설치 스크립트 동작 방식은 다음과 같습니다.
+`curl | sh` 흐름을 원하시면:
 
-- `--client agents` 는 범용 `.agents/skills` 규약 경로에 설치합니다.
-- `--client codex` 는 Codex 전용 skills 경로에 설치합니다.
-- 그 외 클라이언트 이름은 `~/.<client>/skills` 또는 `./.<client>/skills` 로 설치합니다.
-- `--scope user` 는 사용자 전역 설치입니다.
-- `--scope project` 는 현재 디렉터리 기준 로컬 설치입니다.
+```bash
+curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
+curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope project
+```
+
+### 선택적 native layout
+
+설치 스크립트는 문서로 명시된 native layout 만 관리합니다. 현재는 다음만 제공합니다.
+
+```bash
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user --layout gemini
+```
+
+그 외 native 위치가 필요하면 해당 클라이언트 문서에 맞춰 수동 설치해 주세요.
 
 ## 설치 후
 
-### 먼저 검증
+### 먼저 클라이언트 검증
 
-처음 사용하시기 전에 아래 명령으로 검증해 주시는 편이 좋습니다.
+처음 사용하시기 전에 반드시 검증해 주세요.
 
 ```bash
-python zai-deep-research/scripts/run.py --validate
+python zai-deep-research/scripts/run.py --validate --client codex
+python zai-deep-research/scripts/run.py --validate --client claude
+python zai-deep-research/scripts/run.py --validate --client opencode
+python zai-deep-research/scripts/run.py --validate --client gemini
 ```
 
-이 검증은 다음 항목을 확인합니다.
+지원 CLI 가 여러 개 설치되어 있어 `--client auto` 가 모호하면, 반드시 `--client` 를 명시해서 다시 실행해 주세요.
 
-- 스킬 이름과 디렉터리 연결 상태
-- `agents/*.md` 템플릿이 런타임에서 실제로 로드되는지
-- 각 에이전트 템플릿에 네 개 MCP 이름이 모두 들어 있는지
-- 로컬 에이전트 런타임에 해당 MCP 서버들이 실제로 존재하는지
+### 저장 경로나 기본 backend 설정
 
-### 설정 방법
-
-필요하면 예제 설정 파일을 복사해서 경로를 조정해 주세요.
+저장 경로, MCP 이름, 기본 backend 를 바꾸려면 예제 config 를 복사해서 수정해 주세요.
 
 ```bash
 cp zai-deep-research/assets/config.example.json zai-deep-research/config.json
 ```
 
-저장소 관련 설정은 다음을 제어합니다.
+중요 필드:
 
+- `runtime.client`: 기본 런처 backend (`auto`, `codex`, `claude`, `opencode`, `gemini`)
 - `memory_db_path`: 반복 요약, 보고서, 아티팩트를 저장하는 SQLite 데이터베이스
 - `vector_index_path`: 의미 검색용 FAISS 인덱스 파일
 - `vector_metadata_path`: FAISS 벡터와 함께 저장되는 JSONL 메타데이터
 - `data_dir`: 런타임 상태를 위한 기본 디렉터리
 
-상대 storage 경로는 현재 작업 디렉터리 기준으로 해석됩니다. 예를 들어 `~/realrepo` 에서 실행하면 기본 storage root 는 `~/realrepo/.zai-deep-research` 가 됩니다.
+상대 storage 경로는 현재 작업 디렉터리 기준으로 해석됩니다.
 
-### 사용법
+### 런처 사용법
 
 ```bash
-python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers"
-python zai-deep-research/scripts/run.py "Assess the risks of vendor lock-in for model gateways" --output-dir ./research
-python zai-deep-research/scripts/run.py "Analyze pricing changes" --config ./zai-deep-research/config.json
+python zai-deep-research/scripts/run.py "Compare the latest open-source browser automation MCP servers" --client codex
+python zai-deep-research/scripts/run.py "Assess the risks of vendor lock-in for model gateways" --client claude --output-dir ./research
+python zai-deep-research/scripts/run.py "Analyze pricing changes" --client opencode --config ./zai-deep-research/config.json
+python zai-deep-research/scripts/run.py "Review the latest changes in model gateway pricing" --client gemini --max-iterations 3
 ```
 
 ## 데이터 저장소 설명
 
 기본적으로 런타임 데이터는 현재 작업 디렉터리 아래 `./.zai-deep-research` 에 저장됩니다.
 
-예를 들어 `~/realrepo` 에서 실행하면 기본 경로는 다음과 같습니다.
+예를 들어 `~/realrepo` 에서 런처를 실행하면 기본 경로는 다음과 같습니다.
 
 - `~/realrepo/.zai-deep-research/memory.sqlite`
 - `~/realrepo/.zai-deep-research/vector.index`
@@ -143,4 +168,8 @@ zai-deep-research/
 └── scripts/
 ```
 
-이 구조는 Agent Skills specification 에 맞춰 정리되어 있습니다. 실행 파일은 `scripts/`, 참고 문서는 `references/`, 재사용 자원은 `assets/` 에 두는 방식입니다.
+- `SKILL.md`: 이식 가능한 스킬 계약
+- `agents/`: 네 단계 리서치 프롬프트 템플릿
+- `references/CONFIG.md`: config 와 backend 선택 설명
+- `references/CLIENTS.md`: 클라이언트별 런처와 문제 해결 메모
+- `scripts/`: 선택적 런처, 설치 스크립트, 런타임 보조 코드
