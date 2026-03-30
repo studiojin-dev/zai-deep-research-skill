@@ -1016,6 +1016,7 @@ def run(
     output_dir: str | None = None,
     config_path: str | None = None,
     client: str | None = None,
+    emit_progress: bool = False,
 ) -> dict[str, Any]:
     start_time = time.monotonic()
     config = load_config(config_path)
@@ -1041,12 +1042,32 @@ def run(
             required_mcp_names,
         )
         disabled_mcp_names = sorted(unhealthy_mcps)
+    active_mcp_names = [
+        name
+        for name in validation_report.configured_mcp_names
+        if name not in disabled_mcp_names
+    ]
 
     configure_runtime(config)
     memory_init_memory()
 
     session_id = build_session_id(query)
     resolved_output_dir = resolve_output_dir(output_dir)
+
+    if emit_progress:
+        print(f"Client: {backend.name}", flush=True)
+        print(
+            "Configured MCPs: "
+            + (", ".join(validation_report.configured_mcp_names) if validation_report.configured_mcp_names else "(none)")
+        , flush=True)
+        print(
+            "Active MCPs for this run: "
+            + (", ".join(active_mcp_names) if active_mcp_names else "(none)")
+        , flush=True)
+        print(
+            "Disabled MCPs for this run: "
+            + (", ".join(disabled_mcp_names) if disabled_mcp_names else "(none)")
+        , flush=True)
 
     planner_raw = backend.run_prompt(
         build_planner_prompt(
@@ -1069,6 +1090,8 @@ def run(
             "clarification_questions": list(plan.get("questions", [])),
             "duration_ms": elapsed_ms(start_time),
             "token_usage": None,
+            "configured_mcp_names": validation_report.configured_mcp_names,
+            "active_mcp_names": active_mcp_names,
             "disabled_mcp_names": disabled_mcp_names,
         }
 
@@ -1178,6 +1201,8 @@ def run(
         "clarification_questions": [],
         "duration_ms": elapsed_ms(start_time),
         "token_usage": None,
+        "configured_mcp_names": validation_report.configured_mcp_names,
+        "active_mcp_names": active_mcp_names,
         "disabled_mcp_names": disabled_mcp_names,
     }
 
@@ -1275,9 +1300,6 @@ def print_run_result(result: dict[str, Any], skill_name: str) -> int:
             print(f"{idx}. {question}")
         return 2
 
-    print(f"Client: {result['client']}")
-    if result.get("disabled_mcp_names"):
-        print(f"Disabled MCPs for this run: {', '.join(result['disabled_mcp_names'])}")
     print(f"Saved: {result['report_path']}")
     return 0
 
@@ -1300,6 +1322,7 @@ def main(arguments: argparse.Namespace) -> int:
         output_dir=arguments.output_dir,
         config_path=arguments.config,
         client=arguments.client,
+        emit_progress=not arguments.json,
     )
     if arguments.json:
         emit_json(result)

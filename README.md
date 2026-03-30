@@ -161,7 +161,7 @@ ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python zai-deep-research/scripts/r
 
 When the selected backend is `codex`, the launcher now forces sub-runs to use `reasoning_effort="medium"` so the skill does not inherit an excessively slow global `xhigh` setting.
 
-If the launcher detects broken remote MCP transports during a codex preflight probe, it automatically excludes those MCPs for the current run instead of waiting for the main researcher turn to hang. In text mode this appears as `Disabled MCPs for this run: ...`; in JSON mode the same list is returned as `disabled_mcp_names`.
+If the launcher detects broken remote MCP transports during a codex preflight probe, it automatically excludes those MCPs for the current run instead of waiting for the main researcher turn to hang. In text mode the launcher now prints `Configured MCPs`, `Active MCPs for this run`, and `Disabled MCPs for this run` before research starts. In JSON mode the same state is returned as `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names`.
 
 ### Machine-readable launcher output
 
@@ -169,7 +169,7 @@ Use `--json` when you need a stable interface for automation, eval harnesses, or
 
 - `--validate --json` returns validation status, configured MCP names, missing MCPs, vector memory availability, and duration.
 - normal `--json` runs return `success`, `clarification_required`, or `error` status plus client, session id, report path, iteration count, clarification questions, duration, and best-effort token usage.
-- codex runs may also return `disabled_mcp_names` when the launcher temporarily excludes MCPs that fail the preflight transport probe.
+- successful or clarification JSON results also include `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names` so wrappers can see the preflight MCP state without parsing text.
 - when clarification is required, the launcher exits with code `2`, leaves `report_path` empty, and returns the blocking questions in `clarification_questions`.
 - `token_usage` may be `null` when the selected backend does not expose stable usage metadata.
 

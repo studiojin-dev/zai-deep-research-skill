@@ -161,7 +161,7 @@ ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python zai-deep-research/scripts/r
 
 선택한 backend 가 `codex` 라면, 런처는 sub-run 에 `reasoning_effort="medium"` 을 강제로 적용합니다. 사용자의 global profile 이 `xhigh` 여도 이 스킬이 과도하게 느려지는 것을 막기 위한 설정입니다.
 
-또한 codex preflight probe 에서 깨진 remote MCP transport 를 감지하면, researcher 단계가 멈출 때까지 기다리지 않고 그 MCP 들을 이번 런에서 자동 제외합니다. 텍스트 모드에서는 `Disabled MCPs for this run: ...` 로 보이고, JSON 모드에서는 `disabled_mcp_names` 로 반환됩니다.
+또한 codex preflight probe 에서 깨진 remote MCP transport 를 감지하면, researcher 단계가 멈출 때까지 기다리지 않고 그 MCP 들을 이번 런에서 자동 제외합니다. 텍스트 모드에서는 연구 시작 전에 `Configured MCPs`, `Active MCPs for this run`, `Disabled MCPs for this run` 이 먼저 출력되고, JSON 모드에서는 같은 정보가 `configured_mcp_names`, `active_mcp_names`, `disabled_mcp_names` 로 반환됩니다.
 
 ### 기계 판독용 출력
 
@@ -169,7 +169,7 @@ ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python zai-deep-research/scripts/r
 
 - `--validate --json` 은 validation 상태, 감지한 MCP 이름, 누락 MCP, vector memory 가능 여부, duration 을 반환합니다.
 - 일반 `--json` 실행은 `success`, `clarification_required`, `error` 중 하나의 status 와 함께 client, session id, report path, iteration count, clarification questions, duration, best-effort token usage 를 반환합니다.
-- codex 실행에서는 preflight transport probe 에 실패한 MCP 를 임시 제외한 경우 `disabled_mcp_names` 가 함께 반환될 수 있습니다.
+- success 또는 clarification JSON 결과에는 preflight MCP 상태를 알 수 있도록 `configured_mcp_names`, `active_mcp_names`, `disabled_mcp_names` 도 함께 포함됩니다.
 - 추가 질문이 필요하면 exit code `2` 로 종료하고, `report_path` 는 비워 두며, 막힌 질문은 `clarification_questions` 로 돌려줍니다.
 - 선택한 backend 가 안정적인 usage metadata 를 주지 않으면 `token_usage` 는 `null` 일 수 있습니다.
 
