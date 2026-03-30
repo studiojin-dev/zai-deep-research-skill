@@ -72,18 +72,41 @@ Each client has its own MCP configuration format. What matters for this skill is
 
 ## Installation
 
-### Canonical shared install
+### Interactive installer
 
-The recommended install target is the shared Agent Skills path:
+By default, the installer now asks target-by-target whether to install to:
 
-- user scope: `~/.agents/skills`
-- workspace scope: `./.agents/skills`
+- shared Agent Skills path (`.agents`)
+- Codex
+- OpenCode
+- Gemini
+- Claude Code
+
+`.agents` is not a separate AI product. In this repository it means the shared Agent Skills location used as a portable install target across compatible clients.
+
+Example:
+
+```bash
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
+```
+
+### Explicit single-target install
+
+Use `--layout` when you want a single non-interactive install target:
+
+- `shared`: `~/.agents/skills` or `./.agents/skills`
+- `codex`: `~/.codex/skills`
+- `opencode`: `~/.config/opencode/skills`
+- `gemini`: `~/.gemini/skills`
+- `claude`: `~/.claude/skills`
 
 If you already cloned this repository:
 
 ```bash
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout shared --scope user
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout codex
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout opencode
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout claude
 sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project --dry-run
 ```
 
@@ -97,15 +120,7 @@ curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-ski
 Use `--dry-run` whenever you want to confirm the resolved source and destination before copying files.
 Use `--force` only when you intentionally want to replace an existing installation.
 
-### Optional native layout
-
-The installer only manages native layouts that are explicitly documented. Today that means:
-
-```bash
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user --layout gemini
-```
-
-For other native locations, install manually if your client requires them.
+Native client layouts are user-scope only. `--scope project` is supported only for `--layout shared`.
 
 ## After Installation
 

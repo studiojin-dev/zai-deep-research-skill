@@ -72,18 +72,41 @@
 
 ## 설치 방법
 
-### 권장 공유 설치 경로
+### Interactive 설치
 
-이 저장소는 공유 Agent Skills 경로를 기본 설치 대상으로 권장합니다.
+이제 설치 스크립트는 기본적으로 다음 대상에 설치할지 하나씩 물어봅니다.
 
-- 사용자 전역: `~/.agents/skills`
-- 워크스페이스: `./.agents/skills`
+- 공유 Agent Skills 경로 (`.agents`)
+- Codex
+- OpenCode
+- Gemini
+- Claude Code
+
+여기서 `.agents` 는 별도 AI 도구 이름이 아니라, 이 저장소에서 쓰는 공용 Agent Skills 설치 경로를 뜻합니다.
+
+예시:
+
+```bash
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
+```
+
+### 명시적 단일 대상 설치
+
+하나의 대상만 비대화형으로 설치하고 싶다면 `--layout` 을 사용해 주세요.
+
+- `shared`: `~/.agents/skills` 또는 `./.agents/skills`
+- `codex`: `~/.codex/skills`
+- `opencode`: `~/.config/opencode/skills`
+- `gemini`: `~/.gemini/skills`
+- `claude`: `~/.claude/skills`
 
 이미 저장소를 clone 해 두셨다면:
 
 ```bash
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout shared --scope user
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout codex
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout opencode
+sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --layout claude
 sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope project --dry-run
 ```
 
@@ -97,15 +120,7 @@ curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-ski
 실제 복사 전에 source 와 destination 을 먼저 확인하고 싶으면 `--dry-run` 을 사용해 주세요.
 기존 설치를 의도적으로 덮어써야 할 때만 `--force` 를 사용해 주세요.
 
-### 선택적 native layout
-
-설치 스크립트는 문서로 명시된 native layout 만 관리합니다. 현재는 다음만 제공합니다.
-
-```bash
-sh zai-deep-research/scripts/install.sh --source-dir ./zai-deep-research --scope user --layout gemini
-```
-
-그 외 native 위치가 필요하면 해당 클라이언트 문서에 맞춰 수동 설치해 주세요.
+native client layout 은 user scope 만 지원합니다. `--scope project` 는 `--layout shared` 에서만 지원합니다.
 
 ## 설치 후
 

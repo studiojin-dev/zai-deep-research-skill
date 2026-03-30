@@ -85,6 +85,8 @@ class InstallAndEvalTests(unittest.TestCase):
                 str(INSTALL_SCRIPT),
                 "--source-dir",
                 "./zai-deep-research",
+                "--layout",
+                "shared",
                 "--scope",
                 "project",
                 "--dry-run",
@@ -98,6 +100,26 @@ class InstallAndEvalTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Action: install", result.stdout)
         self.assertIn("Destination path:", result.stdout)
+
+    def test_install_dry_run_codex_layout_uses_native_path(self) -> None:
+        result = subprocess.run(
+            [
+                "sh",
+                str(INSTALL_SCRIPT),
+                "--source-dir",
+                "./zai-deep-research",
+                "--layout",
+                "codex",
+                "--dry-run",
+            ],
+            cwd=str(REPO_ROOT),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(Path.home() / ".codex" / "skills" / "zai-deep-research"), result.stdout)
 
     def test_install_missing_source_dir_reports_clean_error(self) -> None:
         result = subprocess.run(

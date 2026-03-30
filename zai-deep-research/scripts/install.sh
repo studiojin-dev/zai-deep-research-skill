@@ -5,6 +5,7 @@ SKILL_NAME="zai-deep-research"
 DEFAULT_REPO="studiojin-dev/zai-deep-research-skill"
 SCOPE="user"
 LAYOUT="shared"
+LAYOUT_EXPLICIT="0"
 SOURCE_DIR=""
 REPO="$DEFAULT_REPO"
 REF="main"
@@ -14,11 +15,11 @@ DRY_RUN="0"
 usage() {
   cat <<'EOF'
 Usage:
-  sh install.sh [--scope user|project] [--layout shared|gemini] [--source-dir <path>] [--repo <owner/repo>] [--ref <git-ref>] [--force] [--dry-run]
+  sh install.sh [--scope user|project] [--layout shared|codex|opencode|gemini|claude] [--source-dir <path>] [--repo <owner/repo>] [--ref <git-ref>] [--force] [--dry-run]
 
 Options:
-  --scope <user|project>   Install to ~/.agents/skills or ./.agents/skills
-  --layout <shared|gemini> Choose shared Agent Skills layout or Gemini native layout
+  --scope <user|project>   Shared layout supports user/project scope; native client layouts are user-scope only
+  --layout <...>           Install only to the specified layout instead of prompting for each target
   --source-dir <path>      Install from an existing local skill directory
   --repo <owner/repo>      Download the skill from GitHub before installing
   --ref <git-ref>          Git ref used with --repo (default: main)
@@ -27,6 +28,7 @@ Options:
 
 Examples:
   sh install.sh --source-dir ./zai-deep-research --scope user
+  sh install.sh --source-dir ./zai-deep-research --layout codex
   sh install.sh --source-dir ./zai-deep-research --scope project
   sh install.sh --source-dir ./zai-deep-research --scope project --dry-run
   curl -fsSL https://raw.githubusercontent.com/studiojin-dev/zai-deep-research-skill/main/zai-deep-research/scripts/install.sh | sh -s -- --scope user
@@ -52,6 +54,7 @@ while [ $# -gt 0 ]; do
     --layout)
       [ $# -ge 2 ] || fail "--layout requires a value"
       LAYOUT="$2"
+      LAYOUT_EXPLICIT="1"
       shift 2
       ;;
     --client)
@@ -60,13 +63,23 @@ while [ $# -gt 0 ]; do
         agents|shared)
           LAYOUT="shared"
           ;;
+        codex)
+          LAYOUT="codex"
+          ;;
+        opencode)
+          LAYOUT="opencode"
+          ;;
         gemini)
           LAYOUT="gemini"
           ;;
+        claude|claude-code|claude_code)
+          LAYOUT="claude"
+          ;;
         *)
-          fail "--client $2 is no longer inferred to a native path; use --layout shared or install manually"
+          fail "--client $2 is not supported; use --layout shared|codex|opencode|gemini|claude"
           ;;
       esac
+      LAYOUT_EXPLICIT="1"
       shift 2
       ;;
     --source-dir)
@@ -103,23 +116,35 @@ while [ $# -gt 0 ]; do
 done
 
 resolve_destination_root() {
-  if [ "$SCOPE" = "user" ]; then
-    base="$HOME"
-  elif [ "$SCOPE" = "project" ]; then
-    base="$(pwd)"
-  else
-    fail "--scope must be either user or project"
-  fi
-
   case "$LAYOUT" in
     shared)
+      if [ "$SCOPE" = "user" ]; then
+        base="$HOME"
+      elif [ "$SCOPE" = "project" ]; then
+        base="$(pwd)"
+      else
+        fail "--scope must be either user or project"
+      fi
       printf '%s/.agents/skills\n' "$base"
       ;;
+    codex)
+      [ "$SCOPE" = "user" ] || fail "--scope project is only supported for --layout shared"
+      printf '%s/.codex/skills\n' "$HOME"
+      ;;
+    opencode)
+      [ "$SCOPE" = "user" ] || fail "--scope project is only supported for --layout shared"
+      printf '%s/.config/opencode/skills\n' "$HOME"
+      ;;
     gemini)
-      printf '%s/.gemini/skills\n' "$base"
+      [ "$SCOPE" = "user" ] || fail "--scope project is only supported for --layout shared"
+      printf '%s/.gemini/skills\n' "$HOME"
+      ;;
+    claude)
+      [ "$SCOPE" = "user" ] || fail "--scope project is only supported for --layout shared"
+      printf '%s/.claude/skills\n' "$HOME"
       ;;
     *)
-      fail "--layout must be either shared or gemini"
+      fail "--layout must be one of shared, codex, opencode, gemini, claude"
       ;;
   esac
 }
@@ -163,6 +188,52 @@ cleanup_generated_files() {
   find "$target" \( -name '__pycache__' -o -name '.DS_Store' -o -name '*.pyc' \) -exec rm -rf {} + 2>/dev/null || true
 }
 
+layout_label() {
+  case "$1" in
+    shared)
+      printf '.agents shared skills'
+      ;;
+    codex)
+      printf 'Codex'
+      ;;
+    opencode)
+      printf 'OpenCode'
+      ;;
+    gemini)
+      printf 'Gemini'
+      ;;
+    claude)
+      printf 'Claude Code'
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
+confirm_install() {
+  layout_name="$1"
+  if [ ! -t 0 ]; then
+    return 0
+  fi
+
+  while true; do
+    printf 'Install to %s? [y/N] ' "$(layout_label "$layout_name")"
+    IFS= read -r answer || return 1
+    case "$answer" in
+      y|Y|yes|YES)
+        return 0
+        ;;
+      n|N|no|NO|'')
+        return 1
+        ;;
+      *)
+        printf 'Please answer y or n.\n' >&2
+        ;;
+    esac
+  done
+}
+
 print_install_plan() {
   source_path="$1"
   dest_root="$2"
@@ -185,28 +256,61 @@ print_install_plan() {
   printf 'Action: %s\n' "$action"
 }
 
+install_single_target() {
+  layout_name="$1"
+  LAYOUT="$layout_name"
+  dest_root="$(resolve_destination_root)"
+  dest_path="$dest_root/$SKILL_NAME"
+
+  if [ "$DRY_RUN" = "1" ]; then
+    print_install_plan "$SOURCE_PATH" "$dest_root" "$dest_path"
+    return 0
+  fi
+
+  mkdir -p "$dest_root"
+
+  if [ -e "$dest_path" ]; then
+    if [ "$FORCE" = "1" ]; then
+      rm -rf "$dest_path"
+    else
+      fail "destination already exists: $dest_path (use --force to replace)"
+    fi
+  fi
+
+  cp -R "$SOURCE_PATH" "$dest_path"
+  cleanup_generated_files "$dest_path"
+
+  printf 'Installed %s to %s\n' "$SKILL_NAME" "$dest_path"
+}
+
+install_interactive_targets() {
+  selected_count="0"
+  for layout_name in shared codex opencode gemini claude; do
+    if confirm_install "$layout_name"; then
+      install_single_target "$layout_name"
+      selected_count=$((selected_count + 1))
+    fi
+  done
+
+  if [ "$selected_count" -eq 0 ]; then
+    printf 'No installation targets selected.\n'
+    return 0
+  fi
+
+  printf 'Recommended next step: validate one installed target, for example:\n'
+  printf '  python ~/.codex/skills/%s/scripts/run.py --validate --client codex\n' "$SKILL_NAME"
+}
+
 SOURCE_PATH="$(resolve_source_dir)"
 
-DEST_ROOT="$(resolve_destination_root)"
-DEST_PATH="$DEST_ROOT/$SKILL_NAME"
-
-if [ "$DRY_RUN" = "1" ]; then
-  print_install_plan "$SOURCE_PATH" "$DEST_ROOT" "$DEST_PATH"
+if [ "$LAYOUT_EXPLICIT" = "1" ]; then
+  install_single_target "$LAYOUT"
+  DEST_ROOT="$(resolve_destination_root)"
+  DEST_PATH="$DEST_ROOT/$SKILL_NAME"
+  if [ "$DRY_RUN" = "0" ]; then
+    printf 'Recommended next step: python %s/scripts/run.py --validate --client <codex|claude|opencode|gemini>\n' "$DEST_PATH"
+  fi
   exit 0
 fi
 
-mkdir -p "$DEST_ROOT"
-
-if [ -e "$DEST_PATH" ]; then
-  if [ "$FORCE" = "1" ]; then
-    rm -rf "$DEST_PATH"
-  else
-    fail "destination already exists: $DEST_PATH (use --force to replace)"
-  fi
-fi
-
-cp -R "$SOURCE_PATH" "$DEST_PATH"
-cleanup_generated_files "$DEST_PATH"
-
-printf 'Installed %s to %s\n' "$SKILL_NAME" "$DEST_PATH"
-printf 'Recommended next step: python %s/scripts/run.py --validate --client <codex|claude|opencode|gemini>\n' "$DEST_PATH"
+install_interactive_targets

@@ -26,7 +26,10 @@ Use this skill when the user needs a researched answer grounded in current web p
 - `scripts/eval.py` — snapshots the current skill, runs the committed eval suite against `with_skill` and `old_skill`, and generates grading plus benchmark artifacts.
 
 ## Installation note
+- The installer can now prompt target-by-target for `.agents`, `codex`, `opencode`, `gemini`, and `claude`.
+- `.agents` means the shared Agent Skills path, not a separate AI coding product.
 - Shared installs live under `~/.agents/skills/zai-deep-research` or `./.agents/skills/zai-deep-research`.
+- Native client installs use `~/.codex/skills`, `~/.config/opencode/skills`, `~/.gemini/skills`, and `~/.claude/skills`.
 - Repository-relative examples like `python scripts/run.py ...` assume your current directory is the skill root. If you installed the skill elsewhere, run the same commands from the installed skill directory or with absolute paths.
 
 ## Default workflow
