@@ -1,0 +1,9 @@
+.DS_Store
+**/.DS_Store
+**/__pycache__/
+**/*.py[cod]
+.agents/
+.codex/
+.zai-deep-research/
+/research/
+zai-deep-research/config.json
