@@ -35,7 +35,11 @@ AGENT_FILES = ("planner.md", "researcher.md", "summarizer.md", "synthesizer.md")
 SUPPORTED_CLIENTS = ("auto", "codex", "claude", "opencode", "gemini")
 BACKEND_PROBE_ORDER = ("codex", "claude", "opencode", "gemini")
 ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+RMCP_FATAL_RE = re.compile(r"rmcp::transport::worker: worker quit with fatal: .+")
 COMMAND_TIMEOUT_SECONDS = 300
+CODEX_MCP_PROBE_TIMEOUT_SECONDS = 30
+CODEX_REASONING_EFFORT = "medium"
+REMOTE_MCP_TRANSPORTS = {"streamable_http", "http", "sse"}
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,13 @@ class CommandResult:
     stdout: str
     stderr: str
     returncode: int
+
+
+@dataclass(frozen=True)
+class CodexExecOutput:
+    assistant_text: str
+    usage: dict[str, Any] | None
+    rmcp_errors: list[str]
 
 
 @dataclass(frozen=True)
@@ -54,7 +65,13 @@ class ClientBackend:
     def is_available(self) -> bool:
         return shutil.which(self.executable) is not None
 
-    def run_prompt(self, prompt: str, cwd: Path) -> str:
+    def run_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+    ) -> str:
         raise NotImplementedError
 
     def list_mcp_names(self, cwd: Path) -> set[str]:
@@ -121,6 +138,67 @@ def unique_preserve_order(items: list[str]) -> list[str]:
         seen.add(normalized)
         result.append(normalized)
     return result
+
+
+def extract_rmcp_fatal_lines(text: str) -> list[str]:
+    if not text:
+        return []
+    return unique_preserve_order(
+        [match.group(0).strip() for match in RMCP_FATAL_RE.finditer(strip_ansi(text))]
+    )
+
+
+def parse_codex_exec_json(raw_output: str) -> tuple[str, dict[str, Any] | None]:
+    assistant_messages: list[str] = []
+    usage: dict[str, Any] | None = None
+
+    for line in strip_ansi(raw_output).splitlines():
+        stripped = line.strip()
+        if not stripped or not stripped.startswith("{"):
+            continue
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("type") == "item.completed":
+            item = event.get("item", {})
+            if item.get("type") == "agent_message":
+                text = str(item.get("text", "")).strip()
+                if text:
+                    assistant_messages.append(text)
+        elif event.get("type") == "turn.completed":
+            event_usage = event.get("usage")
+            if isinstance(event_usage, dict):
+                usage = event_usage
+
+    if not assistant_messages:
+        raise LauncherError("codex returned no assistant message")
+    return assistant_messages[-1], usage
+
+
+def parse_mcp_transport(raw_output: str) -> str | None:
+    for line in strip_ansi(raw_output).splitlines():
+        stripped = line.strip()
+        if stripped.startswith("transport:"):
+            return stripped.split(":", 1)[1].strip()
+    return None
+
+
+def format_unavailable_mcp_note(disabled_mcp_names: list[str] | None) -> str:
+    if not disabled_mcp_names:
+        return ""
+    joined = ", ".join(disabled_mcp_names)
+    return (
+        "\n\n"
+        f"Temporarily unavailable MCP servers this run: {joined}\n"
+        "Do not attempt to use those MCP servers. Continue with the remaining configured MCPs."
+    )
+
+
+def codex_mcp_enabled_override(name: str, enabled: bool) -> str:
+    value = "true" if enabled else "false"
+    return f"mcp_servers.{name}.enabled={value}"
 
 
 def build_session_id(query: str) -> str:
@@ -434,9 +512,13 @@ def maybe_index_iteration_summary(
     )
 
 
-def build_planner_prompt(config: SkillConfig, user_query: str) -> str:
+def build_planner_prompt(
+    config: SkillConfig,
+    user_query: str,
+    disabled_mcp_names: list[str] | None = None,
+) -> str:
     template = render_agent_template(config, "planner.md")
-    return f"{template}\n\nUser request:\n{user_query}".strip()
+    return f"{template}{format_unavailable_mcp_note(disabled_mcp_names)}\n\nUser request:\n{user_query}".strip()
 
 
 def build_researcher_prompt(
@@ -447,6 +529,7 @@ def build_researcher_prompt(
     prior_summaries: list[str],
     recommended_mcps: list[str],
     memory_context: str,
+    disabled_mcp_names: list[str] | None = None,
 ) -> str:
     template = render_agent_template(config, "researcher.md")
     prior_context = "\n\n".join(
@@ -455,7 +538,7 @@ def build_researcher_prompt(
     )
     recommended_text = ", ".join(recommended_mcps) if recommended_mcps else "(not specified)"
     return (
-        f"{template}\n\n"
+        f"{template}{format_unavailable_mcp_note(disabled_mcp_names)}\n\n"
         f"Quality goal: {quality_goal}\n"
         f"Current iteration: {iteration}\n"
         f"Current query: {query}\n"
@@ -520,16 +603,80 @@ def save_final_report(session_id: str, output_dir: Path, report_md: str) -> Path
 
 
 class CodexBackend(ClientBackend):
-    def run_prompt(self, prompt: str, cwd: Path) -> str:
-        result = run_command(
-            [self.executable, "exec", "--skip-git-repo-check", "-"],
-            cwd=cwd,
-            input_text=prompt,
-        )
+    def build_exec_command(self, disabled_mcp_names: list[str] | None = None) -> list[str]:
+        command = [
+            self.executable,
+            "exec",
+            "--skip-git-repo-check",
+            "--json",
+            "-c",
+            f'reasoning_effort="{CODEX_REASONING_EFFORT}"',
+        ]
+        for name in disabled_mcp_names or []:
+            command.extend(["-c", codex_mcp_enabled_override(name, False)])
+        command.append("-")
+        return command
+
+    def run_exec_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> CodexExecOutput:
+        env_updates: dict[str, str] | None = None
+        if timeout_seconds is not None:
+            env_updates = {
+                "ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS": str(timeout_seconds)
+            }
+
+        try:
+            result = run_command(
+                self.build_exec_command(disabled_mcp_names),
+                cwd=cwd,
+                input_text=prompt,
+                env_updates=env_updates,
+            )
+        except LauncherError as exc:
+            rmcp_errors = extract_rmcp_fatal_lines(str(exc))
+            if rmcp_errors:
+                raise LauncherError(
+                    "codex encountered MCP transport failures while starting this run:\n"
+                    + "\n".join(rmcp_errors)
+                ) from exc
+            raise
+
+        rmcp_errors = extract_rmcp_fatal_lines(f"{result.stderr}\n{result.stdout}")
         if result.returncode != 0:
             details = result.stderr or result.stdout or "unknown codex exec error"
+            if rmcp_errors:
+                details = (
+                    "MCP transport failures:\n"
+                    + "\n".join(rmcp_errors)
+                    + "\n\n"
+                    + details
+                )
             raise LauncherError(f"{self.name} exec failed: {details}")
-        return normalize_assistant_text(result.stdout)
+        assistant_text, usage = parse_codex_exec_json(result.stdout)
+        return CodexExecOutput(
+            assistant_text=normalize_assistant_text(assistant_text),
+            usage=usage,
+            rmcp_errors=rmcp_errors,
+        )
+
+    def run_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+    ) -> str:
+        return self.run_exec_prompt(
+            prompt,
+            cwd,
+            disabled_mcp_names=disabled_mcp_names,
+        ).assistant_text
 
     def list_mcp_names(self, cwd: Path) -> set[str]:
         result = run_command(
@@ -541,9 +688,25 @@ class CodexBackend(ClientBackend):
             raise LauncherError(f"{self.name} mcp list failed: {details}")
         return parse_generic_mcp_list(result.stdout)
 
+    def get_mcp_transport(self, name: str, cwd: Path) -> str | None:
+        result = run_command(
+            [self.executable, "mcp", "get", name],
+            cwd=cwd,
+        )
+        if result.returncode != 0:
+            details = result.stderr or result.stdout or "unknown mcp get error"
+            raise LauncherError(f"{self.name} mcp get {name} failed: {details}")
+        return parse_mcp_transport(result.stdout)
+
 
 class ClaudeBackend(ClientBackend):
-    def run_prompt(self, prompt: str, cwd: Path) -> str:
+    def run_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+    ) -> str:
         result = run_command(
             [
                 self.executable,
@@ -573,7 +736,13 @@ class ClaudeBackend(ClientBackend):
 
 
 class OpenCodeBackend(ClientBackend):
-    def run_prompt(self, prompt: str, cwd: Path) -> str:
+    def run_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+    ) -> str:
         result = run_command(
             [self.executable, "run", "--format", "json", "--dir", str(cwd), prompt],
             cwd=cwd,
@@ -595,7 +764,13 @@ class OpenCodeBackend(ClientBackend):
 
 
 class GeminiBackend(ClientBackend):
-    def run_prompt(self, prompt: str, cwd: Path) -> str:
+    def run_prompt(
+        self,
+        prompt: str,
+        cwd: Path,
+        *,
+        disabled_mcp_names: list[str] | None = None,
+    ) -> str:
         result = run_command(
             [self.executable, "-p", prompt, "--output-format", "json"],
             cwd=cwd,
@@ -794,6 +969,47 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
     )
 
 
+def detect_unhealthy_codex_mcps(
+    backend: CodexBackend,
+    cwd: Path,
+    configured_mcp_names: list[str],
+    candidate_names: list[str],
+) -> dict[str, str]:
+    unhealthy: dict[str, str] = {}
+    probe_prompt = "Reply with exactly OK."
+
+    for name in candidate_names:
+        if name not in configured_mcp_names:
+            continue
+
+        transport = backend.get_mcp_transport(name, cwd)
+        if transport not in REMOTE_MCP_TRANSPORTS:
+            continue
+
+        disabled_mcp_names = [
+            other
+            for other in candidate_names
+            if other in configured_mcp_names and other != name
+        ]
+        try:
+            probe_result = backend.run_exec_prompt(
+                probe_prompt,
+                cwd,
+                disabled_mcp_names=disabled_mcp_names,
+                timeout_seconds=CODEX_MCP_PROBE_TIMEOUT_SECONDS,
+            )
+        except LauncherError as exc:
+            rmcp_errors = extract_rmcp_fatal_lines(str(exc))
+            if rmcp_errors:
+                unhealthy[name] = rmcp_errors[0]
+                continue
+            raise
+        if probe_result.rmcp_errors:
+            unhealthy[name] = probe_result.rmcp_errors[0]
+
+    return unhealthy
+
+
 def run(
     query: str,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
@@ -805,10 +1021,26 @@ def run(
     config = load_config(config_path)
     backend = select_backend(client, config.runtime)
     runtime_cwd = Path.cwd().resolve()
+    required_mcp_names = [
+        config.mcp_servers.search,
+        config.mcp_servers.reader,
+        config.mcp_servers.vision,
+        config.mcp_servers.repository,
+    ]
 
     validation_report = validate_runtime(config, backend, runtime_cwd)
     if not validation_report.is_ok:
         raise LauncherError("invalid skill configuration:\n- " + "\n- ".join(validation_report.issues))
+
+    disabled_mcp_names: list[str] = []
+    if isinstance(backend, CodexBackend):
+        unhealthy_mcps = detect_unhealthy_codex_mcps(
+            backend,
+            runtime_cwd,
+            validation_report.configured_mcp_names,
+            required_mcp_names,
+        )
+        disabled_mcp_names = sorted(unhealthy_mcps)
 
     configure_runtime(config)
     memory_init_memory()
@@ -816,7 +1048,15 @@ def run(
     session_id = build_session_id(query)
     resolved_output_dir = resolve_output_dir(output_dir)
 
-    planner_raw = backend.run_prompt(build_planner_prompt(config, query), runtime_cwd)
+    planner_raw = backend.run_prompt(
+        build_planner_prompt(
+            config,
+            query,
+            disabled_mcp_names=disabled_mcp_names,
+        ),
+        runtime_cwd,
+        disabled_mcp_names=disabled_mcp_names,
+    )
     plan = extract_json_block(planner_raw)
 
     if plan.get("need_user_input"):
@@ -829,11 +1069,20 @@ def run(
             "clarification_questions": list(plan.get("questions", [])),
             "duration_ms": elapsed_ms(start_time),
             "token_usage": None,
+            "disabled_mcp_names": disabled_mcp_names,
         }
 
     clarified_query = plan["clarified_query"]
     quality_goal = plan["quality_goal"]
-    recommended_mcps = unique_preserve_order(plan.get("recommended_mcps", []))
+    recommended_mcps = [
+        name
+        for name in unique_preserve_order(plan.get("recommended_mcps", []))
+        if name not in disabled_mcp_names
+    ]
+    if not recommended_mcps:
+        recommended_mcps = [
+            name for name in required_mcp_names if name not in disabled_mcp_names
+        ]
     pending_queries = unique_preserve_order(plan.get("sub_questions") or [clarified_query])
     iteration_payloads: list[dict[str, Any]] = []
     prior_summaries: list[str] = []
@@ -857,8 +1106,10 @@ def run(
                 prior_summaries=prior_summaries,
                 recommended_mcps=recommended_mcps,
                 memory_context=memory_context,
+                disabled_mcp_names=disabled_mcp_names,
             ),
             runtime_cwd,
+            disabled_mcp_names=disabled_mcp_names,
         )
         researcher_payload = extract_json_block(researcher_raw)
 
@@ -870,6 +1121,7 @@ def run(
                 researcher_payload=researcher_payload,
             ),
             runtime_cwd,
+            disabled_mcp_names=disabled_mcp_names,
         )
         summary_payload = extract_json_block(summarizer_raw)
 
@@ -913,6 +1165,7 @@ def run(
             iteration_payloads=iteration_payloads,
         ),
         runtime_cwd,
+        disabled_mcp_names=disabled_mcp_names,
     )
     report_path = save_final_report(session_id, resolved_output_dir, final_report)
 
@@ -925,6 +1178,7 @@ def run(
         "clarification_questions": [],
         "duration_ms": elapsed_ms(start_time),
         "token_usage": None,
+        "disabled_mcp_names": disabled_mcp_names,
     }
 
 
@@ -1022,6 +1276,8 @@ def print_run_result(result: dict[str, Any], skill_name: str) -> int:
         return 2
 
     print(f"Client: {result['client']}")
+    if result.get("disabled_mcp_names"):
+        print(f"Disabled MCPs for this run: {', '.join(result['disabled_mcp_names'])}")
     print(f"Saved: {result['report_path']}")
     return 0
 

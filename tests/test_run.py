@@ -44,6 +44,38 @@ class RunModuleTests(unittest.TestCase):
         self.assertEqual(run_module.coerce_text_output("hello"), "hello")
         self.assertEqual(run_module.coerce_text_output(None), "")
 
+    def test_extract_rmcp_fatal_lines(self) -> None:
+        sample = """
+        2026-03-30T09:22:27Z ERROR rmcp::transport::worker: worker quit with fatal: Unexpected content type
+        2026-03-30T09:22:28Z ERROR rmcp::transport::worker: worker quit with fatal: Unexpected content type
+        """
+        extracted = run_module.extract_rmcp_fatal_lines(sample)
+        self.assertEqual(
+            extracted,
+            [
+                "rmcp::transport::worker: worker quit with fatal: Unexpected content type",
+            ],
+        )
+
+    def test_parse_codex_exec_json_extracts_last_agent_message(self) -> None:
+        raw_output = "\n".join(
+            [
+                '{"type":"thread.started","thread_id":"1"}',
+                '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"first"}}',
+                '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"second"}}',
+                '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}',
+            ]
+        )
+        assistant_text, usage = run_module.parse_codex_exec_json(raw_output)
+        self.assertEqual(assistant_text, "second")
+        self.assertEqual(usage, {"input_tokens": 10, "output_tokens": 5})
+
+    def test_codex_mcp_enabled_override_quotes_hyphenated_names(self) -> None:
+        self.assertEqual(
+            run_module.codex_mcp_enabled_override("cloudflare-api", False),
+            "mcp_servers.cloudflare-api.enabled=false",
+        )
+
     def test_parse_generic_mcp_list_handles_remote_url_table(self) -> None:
         sample = """WARNING: proceeding, even though we could not update PATH
 Name        Command                                                                                    Args                    Env                                  Cwd            Status   Auth
@@ -108,6 +140,64 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
                 run_module.run_command(["codex", "exec", "--skip-git-repo-check", "-"], cwd=REPO_ROOT)
         self.assertIn("command timed out after", str(context.exception))
         self.assertIn("partial stderr", str(context.exception))
+
+    def test_detect_unhealthy_codex_mcps_marks_only_broken_remote_servers(self) -> None:
+        backend = run_module.CodexBackend("codex", "codex", "Codex CLI")
+
+        def fake_transport(name: str, cwd: Path) -> str | None:
+            transports = {
+                "web-search-zai": "streamable_http",
+                "web-reader-zai": "streamable_http",
+                "vision-zai": "stdio",
+                "zread": "streamable_http",
+            }
+            return transports[name]
+
+        def fake_run_exec_prompt(
+            prompt: str,
+            cwd: Path,
+            *,
+            disabled_mcp_names: list[str] | None = None,
+            timeout_seconds: int | None = None,
+        ) -> run_module.CodexExecOutput:
+            del prompt, cwd, timeout_seconds
+            disabled = set(disabled_mcp_names or [])
+            if "web-search-zai" not in disabled:
+                return run_module.CodexExecOutput("OK", None, [])
+            if "web-reader-zai" not in disabled:
+                return run_module.CodexExecOutput(
+                    "OK",
+                    None,
+                    [
+                        "rmcp::transport::worker: worker quit with fatal: web-reader",
+                    ],
+                )
+            if "zread" not in disabled:
+                return run_module.CodexExecOutput(
+                    "OK",
+                    None,
+                    [
+                        "rmcp::transport::worker: worker quit with fatal: zread",
+                    ],
+                )
+            return run_module.CodexExecOutput("OK", None, [])
+
+        with mock.patch.object(backend, "get_mcp_transport", side_effect=fake_transport):
+            with mock.patch.object(backend, "run_exec_prompt", side_effect=fake_run_exec_prompt):
+                unhealthy = run_module.detect_unhealthy_codex_mcps(
+                    backend,
+                    REPO_ROOT,
+                    ["web-search-zai", "web-reader-zai", "vision-zai", "zread"],
+                    ["web-search-zai", "web-reader-zai", "vision-zai", "zread"],
+                )
+
+        self.assertEqual(
+            unhealthy,
+            {
+                "web-reader-zai": "rmcp::transport::worker: worker quit with fatal: web-reader",
+                "zread": "rmcp::transport::worker: worker quit with fatal: zread",
+            },
+        )
 
 
 if __name__ == "__main__":
