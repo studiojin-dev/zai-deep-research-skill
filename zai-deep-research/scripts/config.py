@@ -34,8 +34,6 @@ def _expand_path(value: str | None, base_dir: Path | None = None) -> Path | None
 class StorageConfig:
     data_dir: Path
     memory_db_path: Path
-    vector_index_path: Path
-    vector_metadata_path: Path
 
 
 @dataclass(frozen=True)
@@ -80,8 +78,6 @@ def _build_default_payload() -> dict[str, Any]:
         "storage": {
             "data_dir": str(data_dir),
             "memory_db_path": str(data_dir / "memory.sqlite"),
-            "vector_index_path": str(data_dir / "vector.index"),
-            "vector_metadata_path": str(data_dir / "vector.jsonl"),
         },
         "mcp_servers": dict(DEFAULT_MCP_SERVERS),
     }
@@ -125,10 +121,6 @@ def load_config(config_path: str | None = None) -> SkillConfig:
         data_dir=data_dir,
         memory_db_path=_expand_path(storage_data.get("memory_db_path"), data_dir)
         or data_dir / "memory.sqlite",
-        vector_index_path=_expand_path(storage_data.get("vector_index_path"), data_dir)
-        or data_dir / "vector.index",
-        vector_metadata_path=_expand_path(storage_data.get("vector_metadata_path"), data_dir)
-        or data_dir / "vector.jsonl",
     )
 
     mcp_data = payload["mcp_servers"]

@@ -5,9 +5,7 @@
   },
   "storage": {
     "data_dir": "./.zai-deep-research",
-    "memory_db_path": "./.zai-deep-research/custom-memory.sqlite",
-    "vector_index_path": "./.zai-deep-research/custom-vector.index",
-    "vector_metadata_path": "./.zai-deep-research/custom-vector.jsonl"
+    "memory_db_path": "./.zai-deep-research/custom-memory.sqlite"
   },
   "mcp_servers": {
     "search": "web-search-zai",

@@ -31,6 +31,7 @@ class FakeBackend:
         self.display_name = "Codex CLI"
         self._names = names
         self.prompts: list[str] = []
+        self.prompt_text_by_step: dict[str, str] = {}
 
     def is_available(self) -> bool:
         return True
@@ -50,6 +51,8 @@ class FakeBackend:
     ) -> str:
         del cwd, disabled_mcp_names, progress_callback, iteration
         self.prompts.append(step_name or "unknown")
+        if step_name is not None:
+            self.prompt_text_by_step[step_name] = prompt
         if step_name == "planner":
             return json_dumps(
                 {
@@ -190,6 +193,7 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
         payload = report.to_payload()
         self.assertEqual(payload["status"], "ok")
         self.assertFalse(payload["missing_mcp_names"])
+        self.assertIn("lexical_memory_available", payload)
 
     def test_run_command_handles_timeout_bytes_without_crashing(self) -> None:
         timeout = subprocess.TimeoutExpired(
@@ -309,7 +313,7 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
             configured_mcp_names=sorted(backend._names),
             required_mcp_names=sorted(backend._names),
             missing_mcp_names=[],
-            vector_memory_available=False,
+            lexical_memory_available=True,
             issues=[],
             duration_ms=1,
         )
@@ -318,8 +322,8 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
             with mock.patch.object(run_module, "validate_runtime", return_value=validation):
                 with mock.patch.object(run_module, "configure_runtime", return_value=None):
                     with mock.patch.object(run_module, "memory_init_memory", return_value=None):
-                        with mock.patch.object(run_module, "memory_save_iteration", return_value=None):
-                            with mock.patch.object(run_module, "maybe_index_iteration_summary", return_value=None):
+                        with mock.patch.object(run_module, "memory_search_iterations", return_value=[]):
+                            with mock.patch.object(run_module, "memory_save_iteration", return_value=None):
                                 with mock.patch.object(run_module, "save_final_report", return_value=REPO_ROOT / "research.md"):
                                     result = run_module.run("q", client="codex")
 
@@ -332,6 +336,74 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
         self.assertIn(("planner", "running"), statuses)
         self.assertIn(("planner", "succeeded"), statuses)
         self.assertIn(("researcher", "succeeded"), statuses)
+
+    def test_build_memory_context_uses_lexical_results(self) -> None:
+        with mock.patch.object(
+            run_module,
+            "memory_search_iterations",
+            return_value=[
+                {
+                    "title": "Prior Report",
+                    "query": "original question",
+                    "summary_md": "A summary that should appear in the prompt context.",
+                    "session_id": "session-a",
+                    "iteration": 2,
+                    "score": -1.25,
+                }
+            ],
+        ):
+            context = run_module.build_memory_context("latest question", current_session_id="session-b")
+
+        self.assertIn("title=Prior Report", context)
+        self.assertIn("Original query: original question", context)
+        self.assertIn("A summary that should appear", context)
+
+    def test_run_includes_prior_memory_in_researcher_prompt(self) -> None:
+        config = run_module.load_config(None)
+        backend = FakeBackend(
+            {
+                config.mcp_servers.search,
+                config.mcp_servers.reader,
+                config.mcp_servers.vision,
+                config.mcp_servers.repository,
+            }
+        )
+        validation = run_module.ValidationReport(
+            client="codex",
+            configured_mcp_names=sorted(backend._names),
+            required_mcp_names=sorted(backend._names),
+            missing_mcp_names=[],
+            lexical_memory_available=True,
+            issues=[],
+            duration_ms=1,
+        )
+
+        with mock.patch.object(run_module, "select_backend", return_value=backend):
+            with mock.patch.object(run_module, "validate_runtime", return_value=validation):
+                with mock.patch.object(run_module, "configure_runtime", return_value=None):
+                    with mock.patch.object(run_module, "memory_init_memory", return_value=None):
+                        with mock.patch.object(
+                            run_module,
+                            "memory_search_iterations",
+                            return_value=[
+                                {
+                                    "title": "Prior Report",
+                                    "query": "original question",
+                                    "summary_md": "Prior memory summary",
+                                    "session_id": "session-a",
+                                    "iteration": 2,
+                                    "score": -1.0,
+                                }
+                            ],
+                        ):
+                            with mock.patch.object(run_module, "memory_save_iteration", return_value=None):
+                                with mock.patch.object(run_module, "save_final_report", return_value=REPO_ROOT / "research.md"):
+                                    result = run_module.run("q", client="codex")
+
+        self.assertEqual(result["status"], "success")
+        researcher_prompt = backend.prompt_text_by_step["researcher"]
+        self.assertIn("Relevant prior memory:", researcher_prompt)
+        self.assertIn("Prior memory summary", researcher_prompt)
 
 
 if __name__ == "__main__":

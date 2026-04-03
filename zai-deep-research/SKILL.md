@@ -70,7 +70,7 @@ python scripts/run.py "your research query" --client codex --json
 - On `codex`, launcher sub-runs force `reasoning_effort="medium"` so this skill does not inherit an unexpectedly slow global setting.
 - On `codex`, a preflight probe can temporarily disable broken remote MCP transports for the current run. JSON output exposes this as `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names`.
 - Runtime JSON also includes `step_events`, `run_summary`, and `final_decision` so wrappers can distinguish normal completion, skipped steps, and aborted runs.
-- Vector memory is optional. If FAISS dependencies are unavailable, the launcher still runs without semantic recall.
+- The launcher uses SQLite FTS lexical memory for prior-session recall. If SQLite FTS5 is unavailable in the active Python runtime, validation fails before a run starts.
 - The skill supports both live web research and repository-backed investigation. Use the web-centric eval suite to watch for regressions in source hygiene, caveats, and freshness handling.
 
 ## References

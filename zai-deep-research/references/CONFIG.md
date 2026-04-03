@@ -14,9 +14,7 @@ Read this file only when you need to override the default client backend, storag
   },
   "storage": {
     "data_dir": "./.zai-deep-research",
-    "memory_db_path": "./.zai-deep-research/memory.sqlite",
-    "vector_index_path": "./.zai-deep-research/vector.index",
-    "vector_metadata_path": "./.zai-deep-research/vector.jsonl"
+    "memory_db_path": "./.zai-deep-research/memory.sqlite"
   },
   "mcp_servers": {
     "search": "web-search-zai",
@@ -38,7 +36,8 @@ Read this file only when you need to override the default client backend, storag
 - If auto-detection finds multiple installed clients and cannot disambiguate the current runtime, `scripts/run.py` fails and asks for `--client`.
 - The default storage root is `./.zai-deep-research` under the current working directory.
 - `storage.data_dir` is the base directory for runtime state.
-- `memory_db_path`, `vector_index_path`, and `vector_metadata_path` may be absolute or relative.
+- `memory_db_path` may be absolute or relative.
 - Relative `storage.data_dir` values resolve from the current working directory.
 - Relative storage file paths resolve from `storage.data_dir`.
+- SQLite FTS5 must be available in the active Python runtime because lexical memory uses the same database file for indexing and retrieval.
 - `mcp_servers` lets you rename the four MCP endpoints without editing Python code.

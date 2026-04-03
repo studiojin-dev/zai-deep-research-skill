@@ -25,13 +25,11 @@ if str(SCRIPTS_DIR) not in sys.path:
 from config import DEFAULT_SKILL_NAME, RuntimeConfig, SkillConfig, load_config
 from memory import configure as configure_memory
 from memory import init_memory as memory_init_memory
+from memory import is_available as memory_is_available
 from memory import save_artifact as memory_save_artifact
 from memory import save_iteration as memory_save_iteration
 from memory import save_report as memory_save_report
-from vector_store import add_texts as vector_add_texts
-from vector_store import configure as configure_vector_store
-from vector_store import is_available as vector_is_available
-from vector_store import similarity_search as vector_similarity_search
+from memory import search_iterations as memory_search_iterations
 
 DEFAULT_MAX_ITERATIONS = 7
 AGENT_FILES = ("planner.md", "researcher.md", "summarizer.md", "synthesizer.md")
@@ -116,7 +114,7 @@ class ValidationReport:
     configured_mcp_names: list[str]
     required_mcp_names: list[str]
     missing_mcp_names: list[str]
-    vector_memory_available: bool
+    lexical_memory_available: bool
     issues: list[str]
     duration_ms: int
 
@@ -131,7 +129,7 @@ class ValidationReport:
             "configured_mcp_names": self.configured_mcp_names,
             "required_mcp_names": self.required_mcp_names,
             "missing_mcp_names": self.missing_mcp_names,
-            "vector_memory_available": self.vector_memory_available,
+            "lexical_memory_available": self.lexical_memory_available,
             "issues": self.issues,
             "duration_ms": self.duration_ms,
         }
@@ -593,10 +591,6 @@ class RunTracker:
 def configure_runtime(config: SkillConfig) -> None:
     config.storage.data_dir.mkdir(parents=True, exist_ok=True)
     configure_memory(config.storage.memory_db_path)
-    configure_vector_store(
-        index_path=config.storage.vector_index_path,
-        metadata_path=config.storage.vector_metadata_path,
-    )
 
 
 def render_agent_template(config: SkillConfig, agent_filename: str) -> str:
@@ -617,49 +611,38 @@ def render_agent_template(config: SkillConfig, agent_filename: str) -> str:
     return rendered
 
 
-def build_memory_context(query: str, limit: int = 3) -> str:
-    if not vector_is_available():
-        return "(vector memory unavailable)"
-
-    similar = vector_similarity_search(query, k=limit)
+def build_memory_context(
+    query: str,
+    *,
+    current_session_id: str,
+    limit: int = 3,
+) -> str:
+    similar = memory_search_iterations(
+        query,
+        limit=limit,
+        exclude_session_id=current_session_id,
+    )
     if not similar:
         return "(no similar prior memory found)"
 
     lines: list[str] = []
     for item in similar:
-        text = str(item.get("text", "")).strip()
+        text = str(item.get("summary_md", "")).strip()
         if not text:
             continue
+        title = str(item.get("title", "")).strip() or "untitled"
         session_id = item.get("session_id", "unknown")
         iteration = item.get("iteration", "unknown")
-        distance = item.get("distance", "n/a")
+        score = item.get("score", "n/a")
+        source_query = str(item.get("query", "")).strip()
+        snippet = text if len(text) <= 700 else text[:697].rstrip() + "..."
         lines.append(
-            f"- session={session_id}, iteration={iteration}, distance={distance}\n{text}"
+            f"- session={session_id}, iteration={iteration}, title={title}, score={score}\n"
+            f"Original query: {source_query or '(unknown)'}\n"
+            f"{snippet}"
         )
 
     return "\n\n".join(lines) if lines else "(no similar prior memory found)"
-
-
-def maybe_index_iteration_summary(
-    session_id: str,
-    iteration: int,
-    query: str,
-    summary_md: str,
-) -> None:
-    if not vector_is_available():
-        return
-
-    vector_add_texts(
-        [summary_md],
-        [
-            {
-                "session_id": session_id,
-                "iteration": iteration,
-                "query": query,
-                "artifact_type": "iteration_summary",
-            }
-        ],
-    )
 
 
 def build_planner_prompt(
@@ -1182,7 +1165,7 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
             configured_mcp_names=[],
             required_mcp_names=required_mcp_names,
             missing_mcp_names=required_mcp_names,
-            vector_memory_available=vector_is_available(),
+            lexical_memory_available=memory_is_available(),
             issues=issues,
             duration_ms=elapsed_ms(start_time),
         )
@@ -1196,10 +1179,13 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
             configured_mcp_names=[],
             required_mcp_names=required_mcp_names,
             missing_mcp_names=required_mcp_names,
-            vector_memory_available=vector_is_available(),
+            lexical_memory_available=memory_is_available(),
             issues=issues,
             duration_ms=elapsed_ms(start_time),
         )
+
+    if not memory_is_available():
+        issues.append("SQLite FTS5 is unavailable in the current Python runtime")
 
     missing_mcp_names: list[str] = []
     for server_name in required_mcp_names:
@@ -1214,7 +1200,7 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
         configured_mcp_names=configured_mcp_names,
         required_mcp_names=required_mcp_names,
         missing_mcp_names=missing_mcp_names,
-        vector_memory_available=vector_is_available(),
+        lexical_memory_available=memory_is_available(),
         issues=issues,
         duration_ms=elapsed_ms(start_time),
     )
@@ -1510,7 +1496,10 @@ def run(
         seen_queries.add(current_query)
         iteration += 1
 
-        memory_context = build_memory_context(current_query)
+        memory_context = build_memory_context(
+            current_query,
+            current_session_id=session_id,
+        )
         try:
             researcher_raw = execute_step(
                 "researcher",
@@ -1585,12 +1574,6 @@ def run(
             query=current_query,
             summary_md=summary_md,
             findings=findings,
-        )
-        maybe_index_iteration_summary(
-            session_id=session_id,
-            iteration=iteration,
-            query=current_query,
-            summary_md=summary_md,
         )
 
         prior_summaries.append(summary_md)
@@ -1765,8 +1748,6 @@ def print_validation_report(report: ValidationReport, runtime_config: SkillConfi
     if report.missing_mcp_names:
         print(f"Missing MCPs: {', '.join(report.missing_mcp_names)}")
     print(f"Memory DB: {runtime_config.storage.memory_db_path}")
-    print(f"Vector index: {runtime_config.storage.vector_index_path}")
-    print(f"Vector metadata: {runtime_config.storage.vector_metadata_path}")
     print(
         "Required MCP servers: "
         f"{runtime_config.mcp_servers.search}, "
@@ -1775,8 +1756,8 @@ def print_validation_report(report: ValidationReport, runtime_config: SkillConfi
         f"{runtime_config.mcp_servers.repository}"
     )
     print(
-        "Vector memory: "
-        + ("enabled" if report.vector_memory_available else "optional dependency unavailable")
+        "Lexical memory (SQLite FTS): "
+        + ("enabled" if report.lexical_memory_available else "unavailable")
     )
 
 

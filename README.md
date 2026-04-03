@@ -165,9 +165,7 @@ python ~/.agents/skills/zai-deep-research/scripts/run.py --validate --client cod
 Important config fields:
 
 - `runtime.client`: default launcher backend (`auto`, `codex`, `claude`, `opencode`, `gemini`)
-- `memory_db_path`: SQLite database for iteration summaries, reports, and artifacts
-- `vector_index_path`: FAISS index file for semantic retrieval
-- `vector_metadata_path`: JSONL metadata paired with the FAISS vectors
+- `memory_db_path`: SQLite database for iteration summaries, reports, artifacts, and lexical memory indexes
 - `data_dir`: base directory for runtime state
 
 Relative storage paths resolve from the current working directory.
@@ -198,14 +196,14 @@ During execution, the text launcher also prints step status lines for `preflight
 
 Use `--json` when you need a stable interface for automation, eval harnesses, or wrapper scripts. The payload is opt-in so existing text-mode workflows remain unchanged.
 
-- `--validate --json` returns validation status, configured MCP names, missing MCPs, vector memory availability, and duration.
+- `--validate --json` returns validation status, configured MCP names, missing MCPs, lexical memory availability, and duration.
 - normal `--json` runs return `success`, `clarification_required`, or `error` status plus client, session id, report path, iteration count, clarification questions, duration, and best-effort token usage.
 - successful or clarification JSON results also include `configured_mcp_names`, `active_mcp_names`, and `disabled_mcp_names` so wrappers can see the preflight MCP state without parsing text.
 - runtime JSON results also include `step_events`, `run_summary`, and `final_decision` so callers can tell whether the run completed normally, completed with skipped iterations, or aborted.
 - when clarification is required, the launcher exits with code `2`, leaves `report_path` empty, and returns the blocking questions in `clarification_questions`.
 - `token_usage` may be `null` when the selected backend does not expose stable usage metadata.
 
-If vector memory dependencies are not installed, validation reports it as an optional capability state rather than a hard failure.
+If SQLite FTS5 is unavailable in the active Python runtime, validation fails because lexical memory depends on it.
 
 ## Local eval workflow
 
@@ -241,17 +239,11 @@ Each iteration also writes:
 
 Read [zai-deep-research/references/EVALS.md](./zai-deep-research/references/EVALS.md) for the full workflow and benchmark interpretation guidance.
 
-## Optional vector memory setup
+## Lexical memory
 
-Vector memory is optional. The launcher still works without semantic recall.
+Lexical memory now uses SQLite FTS5 inside the same `memory.sqlite` database. No FAISS or embedding packages are required.
 
-If you want it enabled, install the optional packages in your local environment with pinned versions:
-
-```bash
-python3 -m pip install "faiss-cpu==1.9.0.post1" "numpy==1.26.4" "sentence-transformers==3.4.1"
-```
-
-After installing them, rerun:
+If you want to verify that your Python runtime supports it, rerun:
 
 ```bash
 python zai-deep-research/scripts/run.py --validate --client codex
@@ -264,8 +256,6 @@ By default, runtime data is stored under `./.zai-deep-research` in the current w
 For example, if you run the launcher from `~/realrepo`, the default storage paths become:
 
 - `~/realrepo/.zai-deep-research/memory.sqlite`
-- `~/realrepo/.zai-deep-research/vector.index`
-- `~/realrepo/.zai-deep-research/vector.jsonl`
 
 The final Markdown report is written to `./research/` in the current working directory by default. If you prefer a different directory, pass `--output-dir`.
 
