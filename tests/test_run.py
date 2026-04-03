@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import io
 import importlib.util
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -263,6 +265,99 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
             report.deprecated_config_keys_detected,
             ["storage.vector_index_path"],
         )
+
+    def test_cli_validate_json_keeps_validation_shape_for_invalid_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "skill_name": "zai-deep-research",
+                        "runtime": {
+                            "client": "bogus",
+                        },
+                        "storage": {
+                            "data_dir": "./.zai-deep-research",
+                            "memory_db_path": "./.zai-deep-research/memory.sqlite",
+                            "vector_index_path": "./.zai-deep-research/vector.index",
+                        },
+                        "mcp_servers": {
+                            "search": "legacy-search",
+                            "reader": "legacy-reader",
+                            "vision": "legacy-vision",
+                            "repository": "legacy-repository",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = run_module.cli(
+                    ["--validate", "--json", "--config", str(config_path)]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["client"], "bogus")
+        self.assertEqual(
+            payload["required_mcp_names"],
+            [
+                "legacy-search",
+                "legacy-reader",
+                "legacy-vision",
+                "legacy-repository",
+            ],
+        )
+        self.assertEqual(
+            payload["missing_mcp_names"],
+            payload["required_mcp_names"],
+        )
+        self.assertIn("vector_memory_available", payload)
+        self.assertEqual(
+            payload["vector_memory_available"],
+            payload["lexical_memory_available"],
+        )
+        self.assertIn("vector_memory_available", payload["deprecated_fields"])
+        self.assertEqual(
+            payload["deprecated_config_keys_detected"],
+            ["storage.vector_index_path"],
+        )
+        self.assertTrue(payload["warnings"])
+        self.assertIn("storage.vector_index_path", payload["warnings"][0])
+
+    def test_cli_validate_json_keeps_validation_shape_for_backend_selection_failure(self) -> None:
+        unavailable_backend = mock.Mock()
+        unavailable_backend.is_available.return_value = False
+
+        stdout = io.StringIO()
+        with mock.patch.object(run_module, "get_backend", return_value=unavailable_backend):
+            with redirect_stdout(stdout):
+                exit_code = run_module.cli(
+                    ["--validate", "--json", "--client", "gemini"]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "error")
+        self.assertEqual(payload["client"], "gemini")
+        self.assertEqual(payload["configured_mcp_names"], [])
+        self.assertEqual(
+            payload["required_mcp_names"],
+            [
+                "web-search-zai",
+                "web-reader-zai",
+                "vision-zai",
+                "zread",
+            ],
+        )
+        self.assertEqual(
+            payload["missing_mcp_names"],
+            payload["required_mcp_names"],
+        )
+        self.assertIn("vector_memory_available", payload)
+        self.assertIn("vector_memory_available", payload["deprecated_fields"])
 
     def test_run_command_handles_timeout_bytes_without_crashing(self) -> None:
         timeout = subprocess.TimeoutExpired(

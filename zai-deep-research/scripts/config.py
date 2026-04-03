@@ -59,6 +59,13 @@ class SkillConfig:
     deprecated_config_keys_detected: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ConfigInspection:
+    requested_client: str | None
+    required_mcp_names: tuple[str, str, str, str]
+    deprecated_config_keys_detected: tuple[str, ...]
+
+
 def _merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     merged = dict(base)
     for key, value in override.items():
@@ -84,6 +91,19 @@ def _build_default_payload() -> dict[str, Any]:
     }
 
 
+def _resolve_config_path(config_path: str | None, runtime_cwd: Path) -> Path | None:
+    resolved_config_path = _expand_path(config_path, runtime_cwd) if config_path else None
+    if resolved_config_path is not None:
+        return resolved_config_path
+
+    cwd_config_path = runtime_cwd / "config.json"
+    if cwd_config_path.exists():
+        return cwd_config_path.resolve()
+
+    default_path = SKILL_ROOT / "config.json"
+    return default_path.resolve() if default_path.exists() else None
+
+
 def _collect_deprecated_storage_keys(payload: dict[str, Any]) -> tuple[str, ...]:
     storage_data = payload.get("storage", {})
     if not isinstance(storage_data, dict):
@@ -96,16 +116,71 @@ def _collect_deprecated_storage_keys(payload: dict[str, Any]) -> tuple[str, ...]
     return tuple(detected)
 
 
+def inspect_config_metadata(
+    config_path: str | None = None,
+    runtime_cwd: Path | None = None,
+) -> ConfigInspection:
+    resolved_runtime_cwd = runtime_cwd or Path.cwd().resolve()
+    resolved_config_path = _resolve_config_path(config_path, resolved_runtime_cwd)
+    required_mcp_names = (
+        DEFAULT_MCP_SERVERS["search"],
+        DEFAULT_MCP_SERVERS["reader"],
+        DEFAULT_MCP_SERVERS["vision"],
+        DEFAULT_MCP_SERVERS["repository"],
+    )
+    if resolved_config_path is None:
+        return ConfigInspection(
+            requested_client=None,
+            required_mcp_names=required_mcp_names,
+            deprecated_config_keys_detected=(),
+        )
+
+    try:
+        override = json.loads(resolved_config_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ConfigInspection(
+            requested_client=None,
+            required_mcp_names=required_mcp_names,
+            deprecated_config_keys_detected=(),
+        )
+
+    if not isinstance(override, dict):
+        return ConfigInspection(
+            requested_client=None,
+            required_mcp_names=required_mcp_names,
+            deprecated_config_keys_detected=(),
+        )
+
+    requested_client: str | None = None
+    runtime_data = override.get("runtime", {})
+    if isinstance(runtime_data, dict):
+        raw_client = runtime_data.get("client")
+        if raw_client is not None:
+            requested_client = str(raw_client).strip() or None
+
+    mcp_data = override.get("mcp_servers", {})
+    if isinstance(mcp_data, dict):
+        required_mcp_names = (
+            str(mcp_data.get("search", DEFAULT_MCP_SERVERS["search"])).strip()
+            or DEFAULT_MCP_SERVERS["search"],
+            str(mcp_data.get("reader", DEFAULT_MCP_SERVERS["reader"])).strip()
+            or DEFAULT_MCP_SERVERS["reader"],
+            str(mcp_data.get("vision", DEFAULT_MCP_SERVERS["vision"])).strip()
+            or DEFAULT_MCP_SERVERS["vision"],
+            str(mcp_data.get("repository", DEFAULT_MCP_SERVERS["repository"])).strip()
+            or DEFAULT_MCP_SERVERS["repository"],
+        )
+
+    return ConfigInspection(
+        requested_client=requested_client,
+        required_mcp_names=required_mcp_names,
+        deprecated_config_keys_detected=_collect_deprecated_storage_keys(override),
+    )
+
+
 def load_config(config_path: str | None = None) -> SkillConfig:
     runtime_cwd = Path.cwd().resolve()
-    resolved_config_path = _expand_path(config_path, runtime_cwd) if config_path else None
-    if resolved_config_path is None:
-        cwd_config_path = runtime_cwd / "config.json"
-        if cwd_config_path.exists():
-            resolved_config_path = cwd_config_path.resolve()
-        else:
-            default_path = SKILL_ROOT / "config.json"
-            resolved_config_path = default_path.resolve() if default_path.exists() else None
+    resolved_config_path = _resolve_config_path(config_path, runtime_cwd)
 
     payload = _build_default_payload()
     deprecated_config_keys_detected: tuple[str, ...] = ()

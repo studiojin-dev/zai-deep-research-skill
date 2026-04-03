@@ -220,6 +220,7 @@ Wrapper 가이드:
 - 이제부터는 `lexical_memory_available` 를 읽어 주세요.
 - 저장된 config 에서 `vector_index_path`, `vector_metadata_path` 는 삭제해 주세요. 현재는 `memory_db_path` 만 사용합니다.
 - `vector_memory_available` 는 임시 alias 로만 취급해 주세요.
+- 전체 validation 이 시작되기 전에 config load 나 backend 선택에서 실패하더라도, `--validate --json` 응답 shape 는 동일하게 유지됩니다.
 
 ## 로컬 eval 워크플로
 

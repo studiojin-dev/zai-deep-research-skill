@@ -22,7 +22,13 @@ SCRIPTS_DIR = SKILL_ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from config import DEFAULT_SKILL_NAME, RuntimeConfig, SkillConfig, load_config
+from config import (
+    DEFAULT_SKILL_NAME,
+    RuntimeConfig,
+    SkillConfig,
+    inspect_config_metadata,
+    load_config,
+)
 from memory import configure as configure_memory
 from memory import init_memory as memory_init_memory
 from memory import is_available as memory_is_available
@@ -45,6 +51,7 @@ HEARTBEAT_INTERVAL_SECONDS = 30
 STALLED_AFTER_SECONDS = 45
 CONSECUTIVE_ITERATION_FAILURE_LIMIT = 2
 CORE_STEP_NAMES = {"planner", "synthesizer", "finalize"}
+DEPRECATED_VALIDATION_FIELDS = ["vector_memory_available"]
 
 
 @dataclass(frozen=True)
@@ -140,6 +147,44 @@ class ValidationReport:
             "deprecated_config_keys_detected": self.deprecated_config_keys_detected,
             "duration_ms": self.duration_ms,
         }
+
+
+def build_deprecated_config_warnings(
+    deprecated_config_keys_detected: list[str],
+) -> list[str]:
+    if not deprecated_config_keys_detected:
+        return []
+    return [
+        "deprecated config keys detected and ignored: "
+        + ", ".join(deprecated_config_keys_detected)
+        + ". Remove them before the next major release."
+    ]
+
+
+def build_validation_error_payload(
+    arguments: argparse.Namespace,
+    exc: Exception,
+    *,
+    started_monotonic: float,
+) -> dict[str, Any]:
+    inspection = inspect_config_metadata(arguments.config, Path.cwd().resolve())
+    required_mcp_names = list(inspection.required_mcp_names)
+    deprecated_config_keys_detected = list(inspection.deprecated_config_keys_detected)
+    client = (arguments.client or inspection.requested_client or "auto").strip() or "auto"
+    issues = [str(exc).strip() or "unexpected launcher error"]
+    report = ValidationReport(
+        client=client,
+        configured_mcp_names=[],
+        required_mcp_names=required_mcp_names,
+        missing_mcp_names=required_mcp_names,
+        lexical_memory_available=memory_is_available(),
+        issues=issues,
+        warnings=build_deprecated_config_warnings(deprecated_config_keys_detected),
+        deprecated_fields=list(DEPRECATED_VALIDATION_FIELDS),
+        deprecated_config_keys_detected=deprecated_config_keys_detected,
+        duration_ms=elapsed_ms(started_monotonic),
+    )
+    return report.to_payload()
 
 
 def coerce_text_output(value: str | bytes | None) -> str:
@@ -1140,18 +1185,13 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
         config.mcp_servers.vision,
         config.mcp_servers.repository,
     ]
-    deprecated_fields = ["vector_memory_available"]
+    deprecated_fields = list(DEPRECATED_VALIDATION_FIELDS)
     deprecated_config_keys_detected = list(config.deprecated_config_keys_detected)
     if config.skill_name != DEFAULT_SKILL_NAME:
         issues.append(
             f"skill_name must be '{DEFAULT_SKILL_NAME}', got '{config.skill_name}'"
         )
-    if deprecated_config_keys_detected:
-        warnings.append(
-            "deprecated config keys detected and ignored: "
-            + ", ".join(deprecated_config_keys_detected)
-            + ". Remove them before the next major release."
-        )
+    warnings.extend(build_deprecated_config_warnings(deprecated_config_keys_detected))
 
     for filename in AGENT_FILES:
         path = SKILL_ROOT / "agents" / filename
@@ -1855,10 +1895,19 @@ def main(arguments: argparse.Namespace) -> int:
 
 def cli(argv: list[str]) -> int:
     arguments = parse_args(argv)
+    started_monotonic = time.monotonic()
     try:
         return main(arguments)
     except LauncherError as exc:
-        if arguments.json:
+        if arguments.validate and arguments.json:
+            emit_json(
+                build_validation_error_payload(
+                    arguments,
+                    exc,
+                    started_monotonic=started_monotonic,
+                )
+            )
+        elif arguments.json:
             emit_json(
                 {
                     "status": "error",
@@ -1869,8 +1918,16 @@ def cli(argv: list[str]) -> int:
         else:
             print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    except Exception:
-        if arguments.json:
+    except Exception as exc:
+        if arguments.validate and arguments.json:
+            emit_json(
+                build_validation_error_payload(
+                    arguments,
+                    exc,
+                    started_monotonic=started_monotonic,
+                )
+            )
+        elif arguments.json:
             emit_json(
                 {
                     "status": "error",
