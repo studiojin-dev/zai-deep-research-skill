@@ -205,6 +205,22 @@ Use `--json` when you need a stable interface for automation, eval harnesses, or
 
 If SQLite FTS5 is unavailable in the active Python runtime, validation fails because lexical memory depends on it.
 
+### Compatibility migration
+
+During the compatibility grace period, the launcher accepts legacy vector config keys and exposes a deprecated validation alias for wrappers that have not migrated yet.
+
+| Old surface | New canonical surface | Current behavior | Removal |
+| --- | --- | --- | --- |
+| `vector_memory_available` | `lexical_memory_available` | Both appear in validation JSON; `vector_memory_available` is deprecated | Next major release |
+| `storage.vector_index_path` | none | Accepted and ignored with a validation warning | Next major release |
+| `storage.vector_metadata_path` | none | Accepted and ignored with a validation warning | Next major release |
+
+Wrapper guidance:
+
+- Read `lexical_memory_available` going forward.
+- Delete `vector_index_path` and `vector_metadata_path` from saved configs; only `memory_db_path` is used now.
+- Treat `vector_memory_available` as a temporary alias only.
+
 ## Local eval workflow
 
 The repository now ships a codex-first, web-centric eval suite under `zai-deep-research/evals/evals.json`.

@@ -41,3 +41,10 @@ Read this file only when you need to override the default client backend, storag
 - Relative storage file paths resolve from `storage.data_dir`.
 - SQLite FTS5 must be available in the active Python runtime because lexical memory uses the same database file for indexing and retrieval.
 - `mcp_servers` lets you rename the four MCP endpoints without editing Python code.
+
+## Compatibility Notes
+
+- `storage.vector_index_path` and `storage.vector_metadata_path` are still accepted during the compatibility grace period, but they are ignored.
+- When those legacy keys are present, validation emits a warning so wrappers can migrate safely.
+- Validation JSON now exposes both `lexical_memory_available` and the deprecated alias `vector_memory_available`.
+- The deprecated alias and ignored vector config keys are scheduled for removal in the next major release.

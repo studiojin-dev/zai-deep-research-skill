@@ -205,6 +205,22 @@ ZAI_DEEP_RESEARCH_COMMAND_TIMEOUT_SECONDS=600 python zai-deep-research/scripts/r
 
 현재 Python 런타임에 SQLite FTS5 가 없으면 lexical memory 를 사용할 수 없으므로 validation 이 실패합니다.
 
+### 호환성 마이그레이션
+
+유예 기간 동안에는 아직 migration 하지 않은 wrapper를 위해 legacy vector 표면도 일부 허용합니다.
+
+| 이전 표면 | 새 canonical 표면 | 현재 동작 | 제거 시점 |
+| --- | --- | --- | --- |
+| `vector_memory_available` | `lexical_memory_available` | validation JSON 에 둘 다 포함되며 `vector_memory_available` 는 deprecated alias 입니다 | 다음 major release |
+| `storage.vector_index_path` | 없음 | config 에 있어도 무시되고 validation warning 이 출력됩니다 | 다음 major release |
+| `storage.vector_metadata_path` | 없음 | config 에 있어도 무시되고 validation warning 이 출력됩니다 | 다음 major release |
+
+Wrapper 가이드:
+
+- 이제부터는 `lexical_memory_available` 를 읽어 주세요.
+- 저장된 config 에서 `vector_index_path`, `vector_metadata_path` 는 삭제해 주세요. 현재는 `memory_db_path` 만 사용합니다.
+- `vector_memory_available` 는 임시 alias 로만 취급해 주세요.
+
 ## 로컬 eval 워크플로
 
 저장소에는 codex 기준, 웹 중심 eval 세트가 `zai-deep-research/evals/evals.json` 에 포함되어 있습니다.

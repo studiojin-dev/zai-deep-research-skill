@@ -56,6 +56,7 @@ class SkillConfig:
     mcp_servers: McpConfig
     runtime: RuntimeConfig
     config_path: Path | None
+    deprecated_config_keys_detected: tuple[str, ...]
 
 
 def _merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +84,18 @@ def _build_default_payload() -> dict[str, Any]:
     }
 
 
+def _collect_deprecated_storage_keys(payload: dict[str, Any]) -> tuple[str, ...]:
+    storage_data = payload.get("storage", {})
+    if not isinstance(storage_data, dict):
+        return ()
+
+    detected: list[str] = []
+    for key in ("vector_index_path", "vector_metadata_path"):
+        if key in storage_data:
+            detected.append(f"storage.{key}")
+    return tuple(detected)
+
+
 def load_config(config_path: str | None = None) -> SkillConfig:
     runtime_cwd = Path.cwd().resolve()
     resolved_config_path = _expand_path(config_path, runtime_cwd) if config_path else None
@@ -95,8 +108,10 @@ def load_config(config_path: str | None = None) -> SkillConfig:
             resolved_config_path = default_path.resolve() if default_path.exists() else None
 
     payload = _build_default_payload()
+    deprecated_config_keys_detected: tuple[str, ...] = ()
     if resolved_config_path is not None:
         override = json.loads(resolved_config_path.read_text(encoding="utf-8"))
+        deprecated_config_keys_detected = _collect_deprecated_storage_keys(override)
         payload = _merge_dict(payload, override)
 
     skill_name = str(payload["skill_name"]).strip()
@@ -137,4 +152,5 @@ def load_config(config_path: str | None = None) -> SkillConfig:
         mcp_servers=mcp_servers,
         runtime=RuntimeConfig(client=client),
         config_path=resolved_config_path,
+        deprecated_config_keys_detected=deprecated_config_keys_detected,
     )

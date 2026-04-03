@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -194,6 +196,73 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
         self.assertEqual(payload["status"], "ok")
         self.assertFalse(payload["missing_mcp_names"])
         self.assertIn("lexical_memory_available", payload)
+        self.assertIn("vector_memory_available", payload)
+        self.assertEqual(
+            payload["vector_memory_available"],
+            payload["lexical_memory_available"],
+        )
+        self.assertIn("vector_memory_available", payload["deprecated_fields"])
+
+    def test_load_config_accepts_legacy_vector_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "skill_name": "zai-deep-research",
+                        "storage": {
+                            "data_dir": "./.zai-deep-research",
+                            "memory_db_path": "./.zai-deep-research/memory.sqlite",
+                            "vector_index_path": "./.zai-deep-research/vector.index",
+                            "vector_metadata_path": "./.zai-deep-research/vector.jsonl",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = run_module.load_config(str(config_path))
+
+        self.assertEqual(
+            config.deprecated_config_keys_detected,
+            ("storage.vector_index_path", "storage.vector_metadata_path"),
+        )
+
+    def test_validate_runtime_reports_deprecated_config_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            config_path = Path(tempdir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "skill_name": "zai-deep-research",
+                        "storage": {
+                            "data_dir": "./.zai-deep-research",
+                            "memory_db_path": "./.zai-deep-research/memory.sqlite",
+                            "vector_index_path": "./.zai-deep-research/vector.index",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = run_module.load_config(str(config_path))
+
+        backend = FakeBackend(
+            {
+                config.mcp_servers.search,
+                config.mcp_servers.reader,
+                config.mcp_servers.vision,
+                config.mcp_servers.repository,
+            }
+        )
+        report = run_module.validate_runtime(config, backend, REPO_ROOT)
+
+        self.assertTrue(report.is_ok)
+        self.assertTrue(report.warnings)
+        self.assertIn("storage.vector_index_path", report.warnings[0])
+        self.assertEqual(
+            report.deprecated_config_keys_detected,
+            ["storage.vector_index_path"],
+        )
 
     def test_run_command_handles_timeout_bytes_without_crashing(self) -> None:
         timeout = subprocess.TimeoutExpired(
@@ -315,6 +384,9 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
             missing_mcp_names=[],
             lexical_memory_available=True,
             issues=[],
+            warnings=[],
+            deprecated_fields=["vector_memory_available"],
+            deprecated_config_keys_detected=[],
             duration_ms=1,
         )
 
@@ -375,6 +447,9 @@ zread           https://api.z.ai/api/mcp/zread/mcp             -                
             missing_mcp_names=[],
             lexical_memory_available=True,
             issues=[],
+            warnings=[],
+            deprecated_fields=["vector_memory_available"],
+            deprecated_config_keys_detected=[],
             duration_ms=1,
         )
 

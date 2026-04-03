@@ -116,6 +116,9 @@ class ValidationReport:
     missing_mcp_names: list[str]
     lexical_memory_available: bool
     issues: list[str]
+    warnings: list[str]
+    deprecated_fields: list[str]
+    deprecated_config_keys_detected: list[str]
     duration_ms: int
 
     @property
@@ -130,7 +133,11 @@ class ValidationReport:
             "required_mcp_names": self.required_mcp_names,
             "missing_mcp_names": self.missing_mcp_names,
             "lexical_memory_available": self.lexical_memory_available,
+            "vector_memory_available": self.lexical_memory_available,
             "issues": self.issues,
+            "warnings": self.warnings,
+            "deprecated_fields": self.deprecated_fields,
+            "deprecated_config_keys_detected": self.deprecated_config_keys_detected,
             "duration_ms": self.duration_ms,
         }
 
@@ -1125,6 +1132,7 @@ def select_backend(client_override: str | None, runtime: RuntimeConfig) -> Clien
 def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> ValidationReport:
     start_time = time.monotonic()
     issues: list[str] = []
+    warnings: list[str] = []
     configured_mcp_names: list[str] = []
     required_mcp_names = [
         config.mcp_servers.search,
@@ -1132,9 +1140,17 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
         config.mcp_servers.vision,
         config.mcp_servers.repository,
     ]
+    deprecated_fields = ["vector_memory_available"]
+    deprecated_config_keys_detected = list(config.deprecated_config_keys_detected)
     if config.skill_name != DEFAULT_SKILL_NAME:
         issues.append(
             f"skill_name must be '{DEFAULT_SKILL_NAME}', got '{config.skill_name}'"
+        )
+    if deprecated_config_keys_detected:
+        warnings.append(
+            "deprecated config keys detected and ignored: "
+            + ", ".join(deprecated_config_keys_detected)
+            + ". Remove them before the next major release."
         )
 
     for filename in AGENT_FILES:
@@ -1167,6 +1183,9 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
             missing_mcp_names=required_mcp_names,
             lexical_memory_available=memory_is_available(),
             issues=issues,
+            warnings=warnings,
+            deprecated_fields=deprecated_fields,
+            deprecated_config_keys_detected=deprecated_config_keys_detected,
             duration_ms=elapsed_ms(start_time),
         )
 
@@ -1181,6 +1200,9 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
             missing_mcp_names=required_mcp_names,
             lexical_memory_available=memory_is_available(),
             issues=issues,
+            warnings=warnings,
+            deprecated_fields=deprecated_fields,
+            deprecated_config_keys_detected=deprecated_config_keys_detected,
             duration_ms=elapsed_ms(start_time),
         )
 
@@ -1202,6 +1224,9 @@ def validate_runtime(config: SkillConfig, backend: ClientBackend, cwd: Path) -> 
         missing_mcp_names=missing_mcp_names,
         lexical_memory_available=memory_is_available(),
         issues=issues,
+        warnings=warnings,
+        deprecated_fields=deprecated_fields,
+        deprecated_config_keys_detected=deprecated_config_keys_detected,
         duration_ms=elapsed_ms(start_time),
     )
 
@@ -1743,6 +1768,8 @@ def print_validation_report(report: ValidationReport, runtime_config: SkillConfi
         print("Validation failed:")
         for issue in report.issues:
             print(f"- {issue}")
+    for warning in report.warnings:
+        print(f"Warning: {warning}")
     print(f"Client: {report.client}")
     print(f"Configured MCPs: {', '.join(report.configured_mcp_names) if report.configured_mcp_names else '(none detected)'}")
     if report.missing_mcp_names:
@@ -1759,6 +1786,12 @@ def print_validation_report(report: ValidationReport, runtime_config: SkillConfi
         "Lexical memory (SQLite FTS): "
         + ("enabled" if report.lexical_memory_available else "unavailable")
     )
+    if report.deprecated_fields:
+        print(
+            "Deprecated validation aliases: "
+            + ", ".join(report.deprecated_fields)
+            + " (scheduled for removal in the next major release)"
+        )
 
 
 def print_run_result(result: dict[str, Any], skill_name: str) -> int:
